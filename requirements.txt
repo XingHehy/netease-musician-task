@@ -1,0 +1,4 @@
+pycryptodome>=3.14.0
+requests>=2.26.0
+redis>=4.2.0
+apscheduler>=3.10.0

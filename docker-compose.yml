@@ -1,0 +1,22 @@
+services:
+  netease-musician-task:
+    image: netease-musician-task:latest
+    container_name: netease-musician-task
+    restart: always
+    volumes:
+      - ./log:/app/log
+    environment:
+      - TZ=Asia/Shanghai
+      # Redis连接URL，格式：redis://[password@]host:port/db
+      - REDIS_URL=redis://localhost:6379/0
+      # 每日任务执行时间（格式：HH:MM）
+      - SEND_TIME=09:30
+      # 间隔任务的执行间隔天数
+      - EXECUTION_INTERVAL_DAYS=7
+      # 每月最大发送次数限制
+      - MAX_MONTHLY_SENDS=4
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
