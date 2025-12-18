@@ -6,6 +6,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import random
 import time
+import urllib.parse
 
 import redis
 import requests
@@ -44,12 +45,15 @@ logger.addHandler(stream_handler)
 
 
 # Redis配置 - 支持环境变量
-REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/5')
+REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+
+# Redis连接池配置
+REDIS_POOL = None
+REDIS_CONF = None
 
 # 解析redis_url创建REDIS_CONF
 try:
     # 解析Redis URL获取配置参数
-    import urllib.parse
     parsed_url = urllib.parse.urlparse(REDIS_URL)
     
     REDIS_CONF = {
@@ -60,8 +64,11 @@ try:
         'decode_responses': True
     }
     
+    # 创建连接池
+    REDIS_POOL = redis.ConnectionPool(**REDIS_CONF)
+    
     # 测试连接
-    redis_conn = redis.Redis(**REDIS_CONF)
+    redis_conn = redis.Redis(connection_pool=REDIS_POOL)
     redis_conn.ping()
     logger.info(f"成功连接到Redis: {REDIS_URL}")
 except Exception as e:
@@ -74,25 +81,36 @@ except Exception as e:
         'password': None,
         'decode_responses': True
     }
+    # 即使失败也创建连接池，以便后续重试
+    REDIS_POOL = redis.ConnectionPool(**REDIS_CONF)
 
 
-# --- 1. 基础加解密工具类 (保持不变) ---
+# --- 1. 基础加解密工具类 ---
 class CryptoUtil:
     AES_IV = b'0102030405060708'
 
     @staticmethod
     def aes_encrypt(text, key):
-        if isinstance(text, str): text = text.encode('utf-8')
-        pad = 16 - len(text) % 16
-        text = text + pad * chr(pad).encode('utf-8')
-        cipher = AES.new(key.encode('utf-8'), AES.MODE_CBC, CryptoUtil.AES_IV)
-        return base64.b64encode(cipher.encrypt(text)).decode('utf-8')
+        try:
+            if isinstance(text, str): 
+                text = text.encode('utf-8')
+            pad = 16 - len(text) % 16
+            text = text + pad * chr(pad).encode('utf-8')
+            cipher = AES.new(key.encode('utf-8'), AES.MODE_CBC, CryptoUtil.AES_IV)
+            return base64.b64encode(cipher.encrypt(text)).decode('utf-8')
+        except Exception as e:
+            logger.error(f"AES加密失败: {e}")
+            raise
 
     @staticmethod
     def rsa_encrypt(text, pubKey, modulus):
-        text = text[::-1]
-        rs = pow(int(binascii.hexlify(text.encode('utf-8')), 16), int(pubKey, 16), int(modulus, 16))
-        return format(rs, 'x').zfill(256)
+        try:
+            text = text[::-1]
+            rs = pow(int(binascii.hexlify(text.encode('utf-8')), 16), int(pubKey, 16), int(modulus, 16))
+            return format(rs, 'x').zfill(256)
+        except Exception as e:
+            logger.error(f"RSA加密失败: {e}")
+            raise
 
     @staticmethod
     def create_secret_key(size=16):
@@ -123,15 +141,22 @@ class CryptoUtil:
 
     @staticmethod
     def generate_check_token():
-        """
-        生成checkToken
-        """
-        import execjs
-        with open('./checkToken.js', 'r', encoding='utf-8') as f:
-            tst = f.read()
-        checkToken = execjs.compile(tst).call('get_token')
-        return checkToken
-
+        try:
+            import execjs
+            with open('./checkToken.js', 'r', encoding='utf-8') as f:
+                tst = f.read()
+            checkToken = execjs.compile(tst).call('get_token')
+            return checkToken
+        except FileNotFoundError:
+            logger.error("checkToken.js 文件不存在")
+            return ""
+        except ImportError:
+            logger.error("未安装execjs模块")
+            return ""
+        except Exception as e:
+            logger.error(f"生成 checkToken 失败: {e}")
+            return ""
+    
     @staticmethod
     def generate_publish_uuid():
         """
@@ -140,9 +165,16 @@ class CryptoUtil:
         timestamp = int(time.time() * 1000)  # 对应JavaScript中的+(new Date)
         random_num_str = CryptoUtil.oi0x(5)  # 调用oi0x函数生成5位随机数字字符串
         return f"publish-{timestamp}{random_num_str}"
+    
+    @staticmethod
+    def generate_csrf_token():
+        """
+        生成或提取CSRF令牌
+        """
+        return hashlib.md5(str(random.random()).encode()).hexdigest()
 
 
-# --- 2. 网易云特定加密参数生成类 (保持不变) ---
+# --- 2. 网易云特定加密参数生成类 ---
 class NeteaseSecurity:
     MODULUS = '00e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7'
     NONCE = '0CoJUm6Qyw8W8jud'
@@ -150,17 +182,23 @@ class NeteaseSecurity:
 
     @classmethod
     def encrypt_weapi(cls, data_dict):
-        text = json.dumps(data_dict)
-        secret_key = CryptoUtil.create_secret_key(16)
-        params = CryptoUtil.aes_encrypt(text, cls.NONCE)
-        params = CryptoUtil.aes_encrypt(params, secret_key)
-        enc_sec_key = CryptoUtil.rsa_encrypt(secret_key, cls.PUBKEY, cls.MODULUS)
-        return {'params': params, 'encSecKey': enc_sec_key}
+        try:
+            text = json.dumps(data_dict)
+            secret_key = CryptoUtil.create_secret_key(16)
+            params = CryptoUtil.aes_encrypt(text, cls.NONCE)
+            params = CryptoUtil.aes_encrypt(params, secret_key)
+            enc_sec_key = CryptoUtil.rsa_encrypt(secret_key, cls.PUBKEY, cls.MODULUS)
+            return {'params': params, 'encSecKey': enc_sec_key}
+        except Exception as e:
+            logger.error(f"加密API参数失败: {e}")
+            raise
 
 
-# --- 3. 网易云 API 客户端类 (支持 Cookie 字符串) ---
+# --- 3. 网易云 API 客户端类 ---
 class NeteaseClient:
     BASE_URL = 'https://music.163.com'
+    RETRY_TIMES = 3
+    RETRY_DELAY = 2
 
     def __init__(self, cookie_str=None, uid=None):
         self.session = requests.Session()
@@ -173,7 +211,6 @@ class NeteaseClient:
             'Accept': '*/*'
         })
 
-        # 【修改点】解析字符串 Cookie 并注入 Session
         if cookie_str:
             self._parse_and_set_cookie(cookie_str)
 
@@ -186,44 +223,82 @@ class NeteaseClient:
                 if '=' in item:
                     k, v = item.split('=', 1)
                     cookie_dict[k] = v
-            self.session.cookies.update(cookie_dict)
+            if cookie_dict:
+                self.session.cookies.update(cookie_dict)
+            else:
+                logger.warning("Cookie解析结果为空")
         except Exception as e:
             logger.error(f"Cookie 解析失败: {e}")
 
     def get_cookie_str(self):
-        """【修改点】将当前 Session 的 Cookie 导出为字符串，方便存 Redis"""
-        cookie_dict = requests.utils.dict_from_cookiejar(self.session.cookies)
-        return '; '.join([f"{k}={v}" for k, v in cookie_dict.items()])
+        """将当前 Session 的 Cookie 导出为字符串，方便存 Redis"""
+        try:
+            cookie_dict = requests.utils.dict_from_cookiejar(self.session.cookies)
+            return '; '.join([f"{k}={v}" for k, v in cookie_dict.items()])
+        except Exception as e:
+            logger.error(f"导出Cookie字符串失败: {e}")
+            return ''
 
     def request(self, method, path, data=None, encrypt=True):
         url = self.BASE_URL + path
         payload = None
-        try:
-            if method.upper() == 'POST' and data:
-                payload = NeteaseSecurity.encrypt_weapi(data) if encrypt else data
-
-            resp = self.session.request(method, url, data=payload, timeout=10)
-            resp.encoding = 'utf-8'
+        
+        for retry in range(self.RETRY_TIMES):
             try:
-                return resp.json()
-            except json.JSONDecodeError:
-                # 出现这个错误通常是 403 或者被拦截返回了 HTML
-                logger.error(f"非 JSON 响应 [Code: {resp.status_code}]: {resp.text[:50]}")
-                return {'code': -1, 'msg': '非 JSON 响应'}
+                if method.upper() == 'POST' and data:
+                    payload = NeteaseSecurity.encrypt_weapi(data) if encrypt else data
 
-        except requests.RequestException as e:
-            logger.error(f"网络请求异常 [{path}]: {e}")
-            return {'code': 500, 'msg': str(e)}
+                resp = self.session.request(method, url, data=payload, timeout=10)
+                resp.encoding = 'utf-8'
+                
+                if resp.status_code != 200:
+                    logger.warning(f"请求返回非200状态码: {resp.status_code}, URL: {url}")
+                    if retry >= self.RETRY_TIMES - 1:
+                        return {'code': resp.status_code, 'msg': f'HTTP错误: {resp.status_code}'}
+                    time.sleep(self.RETRY_DELAY)
+                    continue
+                
+                try:
+                    return resp.json()
+                except json.JSONDecodeError:
+                    # 出现这个错误通常是 403 或者被拦截返回了 HTML
+                    logger.error(f"非 JSON 响应 [Code: {resp.status_code}]: {resp.text[:50]}")
+                    if retry >= self.RETRY_TIMES - 1:
+                        return {'code': -1, 'msg': '非 JSON 响应'}
+                    time.sleep(self.RETRY_DELAY)
+                    continue
+
+            except requests.RequestException as e:
+                logger.error(f"网络请求异常 [{path}]: {e}")
+                if retry >= self.RETRY_TIMES - 1:
+                    return {'code': 500, 'msg': str(e)}
+                time.sleep(self.RETRY_DELAY)
+                continue
+        
+        return {'code': 500, 'msg': '请求失败，已达最大重试次数'}
 
     @property
     def csrf_token(self):
-        return self.session.cookies.get('__csrf', '')
+        csrf = self.session.cookies.get('__csrf')
+        if csrf: 
+            return csrf
+        logger.warning("Cookie中未找到__csrf，生成新的csrf_token")
+        return CryptoUtil.generate_csrf_token()
 
 
-# --- 4. 账号与登录管理类 (Redis 存取字符串) ---
+# --- 4. 账号与登录管理类 ---
 class AuthManager:
     def __init__(self):
-        self.redis = redis.Redis(**REDIS_CONF)
+        try:
+            self.redis = redis.Redis(connection_pool=REDIS_POOL) if REDIS_POOL else None
+            if self.redis:
+                self.redis.ping()
+                logger.info("Redis连接初始化成功")
+            else:
+                logger.error("Redis连接池未初始化")
+        except Exception as e:
+            logger.error(f"初始化Redis连接失败: {e}")
+            self.redis = None
 
     def login(self, phone, password, task_key=None):
         client = NeteaseClient()
@@ -233,15 +308,16 @@ class AuthManager:
         logger.info(f"正在登录用户: {phone}")
         res = client.request('POST', '/weapi/login/cellphone', data)
 
-        if res.get('code') == 200:
+        if res.get('code') == 200 and res.get('account'):
             real_uid = res['account']['id']
             client.uid = real_uid
 
-            # 【修改点】保存为字符串
-            self._save_session(real_uid, client.get_cookie_str(), res)
+            # 保存为字符串
+            if not self._save_session(real_uid, client.get_cookie_str(), res):
+                logger.warning(f"用户 {real_uid} 登录成功但保存会话失败")
 
-            # 回写真实 UID 逻辑 (保持不变)
-            if task_key:
+            # 回写真实 UID 逻辑
+            if task_key and self.redis:
                 try:
                     user_info_str = self.redis.hget('netease:music:task', task_key)
                     if user_info_str:
@@ -260,60 +336,86 @@ class AuthManager:
             return None
 
     def get_client_by_uid(self, uid):
-        if not uid: return None
+        if not uid or not self.redis:
+            return None
+        
         try:
             # 读取字符串 Cookie
             cookie_str = self.redis.get(f'netease:music:user:{uid}:cookie')
             if cookie_str:
                 client = NeteaseClient(cookie_str=cookie_str, uid=uid)
 
-                # 【修改核心】换用更温和的 GET 接口检测，不加密 (encrypt=False)
-                # 访问用户详情页，如果 Cookie 有效，会返回 200 和用户数据
-                # 如果 Cookie 失效，通常会返回 403 或 301
                 logger.info(f"正在检查用户 {uid} 的 Cookie 有效性...")
 
-                # 注意：这里使用 request('GET', ..., encrypt=False)
                 check = client.request('GET', f'/api/v1/user/detail/{uid}', encrypt=False)
 
                 # 只要 code 是 200 且能拿到 profile，就认为有效
                 if check.get('code') == 200 and check.get('profile'):
-                    logger.info(f"用户 {uid} Cookie 有效 (昵称: {check['profile'].get('nickname')})")
+                    logger.info(f"用户 {uid} Cookie 有效 (昵称: {check['profile'].get('nickname', '未知')})")
                     return client
                 else:
                     # 如果返回的不是 200，记录一下返回了啥，方便调试
                     logger.warning(f"用户 {uid} Cookie 可能已失效，状态码: {check.get('code')}")
-                    # 只有明确失败才返回 None
+                    # 删除失效的Cookie
+                    try:
+                        self.redis.delete(f'netease:music:user:{uid}:cookie')
+                        self.redis.delete(f'netease:music:user:{uid}:userdata')
+                        logger.info(f"已删除用户 {uid} 的失效Cookie")
+                    except Exception as e:
+                        logger.error(f"删除失效Cookie失败: {e}")
                     return None
 
+        except json.JSONDecodeError as e:
+            logger.error(f"解析用户 {uid} 数据时发生JSON错误: {e}")
         except Exception as e:
-            # 如果解析 JSON 报错，说明可能返回了 HTML，那就是 Cookie 真的彻底挂了或者被强力拦截
-            logger.warning(f"检测用户 {uid} 时发生异常 (通常意味着 Cookie 失效): {e}")
+            logger.warning(f"检测用户 {uid} 时发生异常: {e}")
 
         return None
 
     def get_all_users_credentials(self):
-        users = self.redis.hgetall('netease:music:task')
-        user_list = []
-        for task_key, info_str in users.items():
-            try:
-                info = json.loads(info_str)
-                user_list.append({
-                    'task_key': task_key,
-                    'uid': info.get('uid', task_key),  # 优先取 uid
-                    'phone': info.get('phone'),
-                    'password': info.get('password')
-                })
-            except:
-                continue
-        return user_list
+        if not self.redis:
+            logger.error("Redis连接不可用，无法获取用户凭证")
+            return []
+            
+        try:
+            users = self.redis.hgetall('netease:music:task')
+            user_list = []
+            for task_key, info_str in users.items():
+                try:
+                    info = json.loads(info_str)
+                    if all(key in info for key in ['phone', 'password']):
+                        user_list.append({
+                            'task_key': task_key,
+                            'uid': info.get('uid', task_key),  # 优先取 uid
+                            'phone': info.get('phone'),
+                            'password': info.get('password')
+                        })
+                    else:
+                        logger.warning(f"用户数据不完整，缺少必要字段: {task_key}")
+                except json.JSONDecodeError:
+                    logger.error(f"解析用户数据失败: {task_key}")
+                except Exception as e:
+                    logger.error(f"处理用户数据时发生异常: {e}")
+            return user_list
+        except Exception as e:
+            logger.error(f"获取用户凭证时发生异常: {e}")
+            return []
 
     def _save_session(self, uid, cookie_str, user_data):
-        # 【修改点】Key 改回简单的 :cookie，存纯字符串
-        self.redis.set(f'netease:music:user:{uid}:cookie', cookie_str)
-        self.redis.set(f'netease:music:user:{uid}:userdata', json.dumps(user_data))
+        if not self.redis or not cookie_str:
+            return False
+            
+        try:
+            # Key 改回简单的 :cookie，存纯字符串
+            self.redis.set(f'netease:music:user:{uid}:cookie', cookie_str, ex=86400 * 7)  # 7天过期
+            self.redis.set(f'netease:music:user:{uid}:userdata', json.dumps(user_data), ex=86400 * 7)
+            return True
+        except Exception as e:
+            logger.error(f"保存用户 {uid} 会话失败: {e}")
+            return False
 
 
-# --- 5. 任务执行类 (保持不变) ---
+# --- 5. 任务执行类 ---
 class TaskManager:
     def __init__(self, client: NeteaseClient):
         self.client = client
@@ -383,7 +485,6 @@ class TaskManager:
         csrf = self.client.csrf_token
         if not csrf:
             logger.warning("未找到 CSRF Token，尝试使用默认值")
-
         params = {
             "id": song_id,
             "type": "song",
@@ -416,6 +517,8 @@ if __name__ == '__main__':
             # 1. 尝试使用redis存的 Cookie
             if user['uid'] and str(user['uid']) != str(user['phone']):
                 client = auth.get_client_by_uid(user['uid'])
+            else:
+                logger.info(f"用户 {user.get('phone')} 没有有效的UID，将直接登录")
 
             # 2. 失败则登录
             if not client:
@@ -434,29 +537,39 @@ if __name__ == '__main__':
                     musician_cycle_missions_list = musician_cycle_missions_data.get('list', [])
                     for mission in musician_cycle_missions_list:
                         description = mission.get('description')
-                        if "签到" not in description:
-                            continue
-                        logger.info(f"发现签到任务：{description}")
-                        userMissionId = mission.get('userMissionId')
-                        period = mission.get('period')
-                        if userMissionId and period:
-                            logger.info(f"{description}：userMissionId={userMissionId}, period={period}")
-                            reward_obtain_res = task.reward_obtain(userMissionId, period)
-                            logger.info(f"{description}结果：{json.dumps(reward_obtain_res, ensure_ascii=False)[:100]}")
+                        if "签到" in description:
+                            logger.info(f"发现签到任务：{description}")
+                            userMissionId = mission.get('userMissionId')
+                            period = mission.get('period')
+                            if userMissionId and period:
+                                logger.info(f"{description}：userMissionId={userMissionId}, period={period}")
+                                reward_obtain_res = task.reward_obtain(userMissionId, period)
+                                logger.info(f"{description}结果：{json.dumps(reward_obtain_res, ensure_ascii=False)[:100]}")
+                            else:
+                                logger.error(f"执行任务 {description} 失败：userMissionId={userMissionId}, period={period}")
+                    if not musician_cycle_missions_list:
+                        logger.info("未找到任何音乐人任务")
                 else:
                     logger.error(f"获取音乐人循环任务失败：{json.dumps(musician_cycle_missions_res, ensure_ascii=False)[:100]}")
 
                 logger.info(f"开始音乐人发布动态任务：")
                 share_res = task.share_song()
                 if share_res.get('code') == 200:
-                    logger.info(f"分享成功：{json.dumps(share_res, ensure_ascii=False)[:100]}")
-                    event_id = share_res.get('event', {}).get('id')
-                    if event_id:
+                    logger.info(f"发布动态成功：{json.dumps(share_res, ensure_ascii=False)[:100]}")
+                    id_ = share_res.get('event', {}).get('id')
+                    if id_:
                         logger.info("等待 10 秒后删除动态")
                         time.sleep(10)
-                        delete_res = task.delete_dynamic(event_id)
+                        delete_res = task.delete_dynamic(id_)
                         logger.info(f'删除动态结果: {delete_res}')
+                    else:
+                        logger.warning("删除动态失败：动态ID获取失败")
                 else:
-                    logger.warning(f"分享失败：{json.dumps(share_res, ensure_ascii=False)[:100]}")
+                    logger.warning(f"发布动态失败：{json.dumps(share_res, ensure_ascii=False)[:100]}")
+            else:
+                logger.error(f"用户 {user.get('phone')} 无法获取有效的客户端实例")
         except Exception as e:
-            logger.error(f"异常: {e}")
+            logger.error(f"处理用户时发生异常: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            continue

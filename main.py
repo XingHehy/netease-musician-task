@@ -120,9 +120,7 @@ def should_execute_task(user_uid):
         last_send_date = datetime.strptime(last_send_date_str, '%Y-%m-%d').date()
         today = date.today()
         days_since_last_send = (today - last_send_date).days
-        
-        logger.info(f"用户 {user_uid} 距离上次执行已过去 {days_since_last_send} 天，设置的间隔为 {EXECUTION_INTERVAL_DAYS} 天")
-        
+                
         # 检查是否达到执行间隔
         return days_since_last_send >= EXECUTION_INTERVAL_DAYS
     except Exception as e:
@@ -157,9 +155,9 @@ def daily_task_runner():
         logger.info(f"发现 {len(user_list)} 个待处理用户")
         
         if not user_list:
-            logger.info("没有待处理的用户，任务结束")
+            logger.info("没有待处理的用户，【每日任务】结束")
             return
-        
+            
         for user in user_list:
             try:
                 client = None
@@ -195,8 +193,12 @@ def daily_task_runner():
                                 logger.info(f"{description}：userMissionId={userMissionId}, period={period}")
                                 reward_obtain_res = task.reward_obtain(userMissionId, period)
                                 logger.info(f"{description}结果：{json.dumps(reward_obtain_res, ensure_ascii=False)[:100]}")
+                            else:
+                                logger.error(f"执行任务 {description} 失败：userMissionId={userMissionId}, period={period}")
                     else:
                         logger.error(f"获取音乐人循环任务失败：{json.dumps(musician_cycle_missions_res, ensure_ascii=False)[:100]}")
+                else:
+                    logger.error(f"用户 {user.get('uid')} 登录失败，无法执行每日任务")
             except Exception as e:
                 logger.error(f"处理用户 {user.get('uid')} 的每日任务时发生异常: {e}")
                 continue
@@ -218,7 +220,7 @@ def interval_task_runner():
         logger.info(f"发现 {len(user_list)} 个待处理用户")
         
         if not user_list:
-            logger.info("没有待处理的用户，任务结束")
+            logger.info("没有待处理的用户，【间隔任务】结束")
             return
         
         for user in user_list:
@@ -260,19 +262,23 @@ def interval_task_runner():
                     task = TaskManager(client)
                     share_res = task.share_song()
                     if share_res.get('code') == 200:
-                        logger.info(f"分享成功：{json.dumps(share_res, ensure_ascii=False)[:100]}")
+                        logger.info(f"发布动态成功：{json.dumps(share_res, ensure_ascii=False)[:100]}")
                         
                         # 更新最后发送记录
                         update_last_send_record(user_uid)
                         
-                        event_id = share_res.get('event', {}).get('id')
-                        if event_id:
+                        id_ = share_res.get('event', {}).get('id')
+                        if id_:
                             logger.info("等待 10 秒后删除动态")
                             time.sleep(10)
-                            delete_res = task.delete_dynamic(event_id)
+                            delete_res = task.delete_dynamic(id_)
                             logger.info(f'删除动态结果: {delete_res}')
+                        else:
+                            logger.warning("删除动态失败：动态ID获取失败")
                     else:
-                        logger.warning(f"分享失败：{json.dumps(share_res, ensure_ascii=False)[:100]}")
+                        logger.warning(f"发布动态失败：{json.dumps(share_res, ensure_ascii=False)[:100]}")
+                else:
+                    logger.error(f"用户 {user['uid']} 登录失败，跳过发布动态任务")
             except Exception as e:
                 logger.error(f"处理用户 {user.get('uid')} 的发布动态任务时发生异常: {e}")
                 continue
@@ -285,7 +291,7 @@ def interval_task_runner():
 
 def main():
     """主函数"""
-    logger.info("网易云音乐人任务调度器启动")
+    logger.info("网易音乐人任务调度器启动")
     
     # 创建调度器
     scheduler = BlockingScheduler(timezone='Asia/Shanghai')
@@ -308,7 +314,7 @@ def main():
             func=interval_task_runner,
             trigger=CronTrigger(hour=hour, minute=minute + 5, day_of_week='*'),  # 间隔5分钟执行，避免冲突
             id='netease_interval_task',
-            name='网易云音乐人发布动态任务',
+            name='网易音乐人发布动态任务',
             replace_existing=True
         )
         
