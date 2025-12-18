@@ -103,7 +103,7 @@ def save_send_records(data):
         return False
 
 def should_execute_task(user_uid):
-    """检查是否应该执行任务，距离上次执行>=7天则返回True"""
+    """检查是否应该执行任务，距离上次执行>=7天且每月发送次数未达上限则返回True"""
     # 加载发送记录
     send_records = load_send_records()
     
@@ -122,24 +122,48 @@ def should_execute_task(user_uid):
         days_since_last_send = (today - last_send_date).days
                 
         # 检查是否达到执行间隔
-        return days_since_last_send >= EXECUTION_INTERVAL_DAYS
+        if days_since_last_send < EXECUTION_INTERVAL_DAYS:
+            return False
+        
+        # 检查每月发送次数是否超过上限
+        current_year_month = today.strftime('%Y-%m')
+        monthly_sends = user_record.get('monthly_sends', {})
+        current_month_count = monthly_sends.get(current_year_month, 0)
+        
+        if current_month_count >= MAX_MONTHLY_SENDS:
+            logger.info(f"用户 {user_uid} 本月已发送 {current_month_count} 次，已达每月上限 {MAX_MONTHLY_SENDS} 次，跳过本次任务")
+            return False
+        
+        return True
     except Exception as e:
-        logger.error(f"计算执行时间间隔时发生错误: {e}")
+        logger.error(f"计算执行时间间隔或检查每月发送次数时发生错误: {e}")
         return False
 
 def update_last_send_record(user_uid):
-    """更新用户的最后发送记录"""
+    """更新用户的最后发送记录和月度发送计数"""
     send_records = load_send_records()
     today = date.today()
     today_str = today.strftime('%Y-%m-%d')
+    current_year_month = today.strftime('%Y-%m')
     
-    send_records[str(user_uid)] = {
-        'last_send_date': today_str,
-        'update_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    }
+    # 获取用户现有记录，如果不存在则创建新记录
+    user_record = send_records.get(str(user_uid), {})
+    
+    # 更新最后发送日期和更新时间
+    user_record['last_send_date'] = today_str
+    user_record['update_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    # 更新月度发送计数
+    monthly_sends = user_record.get('monthly_sends', {})
+    monthly_sends[current_year_month] = monthly_sends.get(current_year_month, 0) + 1
+    user_record['monthly_sends'] = monthly_sends
+    
+    # 保存更新后的记录
+    send_records[str(user_uid)] = user_record
     
     if save_send_records(send_records):
         logger.info(f"已更新用户 {user_uid} 的最后发送记录到Redis: {today_str}")
+        logger.info(f"用户 {user_uid} {current_year_month} 月发送次数已更新为 {monthly_sends[current_year_month]}/{MAX_MONTHLY_SENDS}")
     else:
         logger.error(f"更新用户 {user_uid} 的最后发送记录失败")
 
