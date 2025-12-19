@@ -20,69 +20,32 @@ import os
 os.makedirs('log', exist_ok=True)
 
 # 配置日志
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('netease_music')
 logger.setLevel(logging.INFO)
 
-# 创建格式化器
-formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
-
-# 创建文件处理器 - 带轮转功能
-file_handler = logging.handlers.RotatingFileHandler(
-    'log/netease_music.log',
-    maxBytes=10 * 1024 * 1024,  # 10MB
-    backupCount=3,  # 最多保留3个备份
-    encoding='utf-8'
-)
-file_handler.setFormatter(formatter)
-
-# 创建控制台处理器
-stream_handler = logging.StreamHandler()
-stream_handler.setFormatter(formatter)
-
-# 添加处理器到 logger
-logger.addHandler(file_handler)
-logger.addHandler(stream_handler)
-
-
-# Redis配置 - 支持环境变量
-REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
-
-# Redis连接池配置
-REDIS_POOL = None
-REDIS_CONF = None
-
-# 解析redis_url创建REDIS_CONF
-try:
-    # 解析Redis URL获取配置参数
-    parsed_url = urllib.parse.urlparse(REDIS_URL)
+if not logger.handlers:
+    # 创建格式化器
+    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
     
-    REDIS_CONF = {
-        'host': parsed_url.hostname or 'localhost',
-        'port': parsed_url.port or 6379,
-        'db': int(parsed_url.path.lstrip('/')) if parsed_url.path and parsed_url.path != '/' else 0,
-        'password': parsed_url.password,
-        'decode_responses': True
-    }
+    # 创建文件处理器 - 带轮转功能
+    file_handler = logging.handlers.RotatingFileHandler(
+        'log/netease_music.log',
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=3,  # 最多保留3个备份
+        encoding='utf-8'
+    )
+    file_handler.setFormatter(formatter)
     
-    # 创建连接池
-    REDIS_POOL = redis.ConnectionPool(**REDIS_CONF)
+    # 创建控制台处理器
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
     
-    # 测试连接
-    redis_conn = redis.Redis(connection_pool=REDIS_POOL)
-    redis_conn.ping()
-    logger.info(f"成功连接到Redis: {REDIS_URL}")
-except Exception as e:
-    logger.error(f"Redis连接失败: {e}")
-    # 使用默认本地配置
-    REDIS_CONF = {
-        'host': 'localhost',
-        'port': 6379,
-        'db': 0,
-        'password': None,
-        'decode_responses': True
-    }
-    # 即使失败也创建连接池，以便后续重试
-    REDIS_POOL = redis.ConnectionPool(**REDIS_CONF)
+    # 添加处理器到 logger
+    logger.addHandler(file_handler)
+    logger.addHandler(stream_handler)
+
+# 从配置文件导入Redis配置
+from config import REDIS_POOL, REDIS_CONF
 
 
 # --- 1. 基础加解密工具类 ---
@@ -293,7 +256,6 @@ class AuthManager:
             self.redis = redis.Redis(connection_pool=REDIS_POOL) if REDIS_POOL else None
             if self.redis:
                 self.redis.ping()
-                logger.info("Redis连接初始化成功")
             else:
                 logger.error("Redis连接池未初始化")
         except Exception as e:
@@ -530,7 +492,7 @@ if __name__ == '__main__':
 
                 daily_task_res = task.daily_task()
                 logger.info(f"日常签到任务结果：{json.dumps(daily_task_res, ensure_ascii=False)[:100]}")
-                
+
                 musician_cycle_missions_res = task.get_musician_cycle_mission()
                 if musician_cycle_missions_res.get('code') == 200:
                     musician_cycle_missions_data = musician_cycle_missions_res.get('data', {})
@@ -546,7 +508,7 @@ if __name__ == '__main__':
                                 reward_obtain_res = task.reward_obtain(userMissionId, period)
                                 logger.info(f"{description}结果：{json.dumps(reward_obtain_res, ensure_ascii=False)[:100]}")
                             else:
-                                logger.error(f"执行任务 {description} 失败：userMissionId={userMissionId}, period={period}")
+                                logger.error(f"执行任务 {description} 失败：mission={mission}")
                     if not musician_cycle_missions_list:
                         logger.info("未找到任何音乐人任务")
                 else:

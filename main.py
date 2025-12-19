@@ -8,68 +8,60 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 # 导入项目核心模块
-from core import AuthManager, TaskManager
+from core import AuthManager, TaskManager, logger
 
-# 配置日志
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-# 创建格式化器
-formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+# 从配置文件导入所有配置
+from config import (
+    REDIS_KEY, REDIS_CONF, REDIS_POOL,
+    MAX_MONTHLY_SENDS, SEND_TIME, EXECUTION_INTERVAL_DAYS
+)
 
 import os
 
 # 确保日志目录存在
 os.makedirs('log', exist_ok=True)
 
-# Redis配置 - 支持环境变量
-REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
-REDIS_KEY = 'netease:music:data'
+# 为 main.py 添加额外的 cron 日志文件处理器（如果还没有添加）
+cron_log_file = 'log/netease_music_cron.log'
+has_cron_handler = False
+for h in logger.handlers:
+    if isinstance(h, RotatingFileHandler):
+        try:
+            # 检查文件路径是否包含 cron 日志文件名
+            if hasattr(h, 'baseFilename') and 'netease_music_cron.log' in h.baseFilename:
+                has_cron_handler = True
+                break
+        except Exception:
+            pass
 
-# 解析redis_url创建REDIS_CONF
+if not has_cron_handler:
+    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+    cron_file_handler = RotatingFileHandler(
+        cron_log_file,
+        maxBytes=10 * 1024 * 1024,  # 10MB
+        backupCount=3,  # 最多保留3个备份
+        encoding='utf-8'
+    )
+    cron_file_handler.setFormatter(formatter)
+    logger.addHandler(cron_file_handler)
+
+# 使用配置中的Redis连接池创建Redis客户端
+# 注意：Redis连接日志已在config.py中记录，这里不再重复记录
 try:
-    # 解析Redis URL获取配置参数
-    import urllib.parse
-    parsed_url = urllib.parse.urlparse(REDIS_URL)
-    
-    REDIS_CONF = {
-        'host': parsed_url.hostname or 'localhost',
-        'port': parsed_url.port or 6379,
-        'db': int(parsed_url.path.lstrip('/')) if parsed_url.path and parsed_url.path != '/' else 0,
-        'password': parsed_url.password,
-        'decode_responses': True
-    }
-    
-    # 使用配置创建Redis连接
-    redis_client = redis.Redis(**REDIS_CONF)
-    # 测试连接
-    redis_client.ping()
-    logger.info("Redis连接成功")
+    if REDIS_POOL:
+        redis_client = redis.Redis(connection_pool=REDIS_POOL)
+        redis_client.ping()
+    else:
+        # 如果连接池未初始化，使用配置创建连接
+        redis_client = redis.Redis(**REDIS_CONF) if REDIS_CONF else None
+        if redis_client:
+            redis_client.ping()
+        else:
+            logger.error("Redis配置未初始化")
+            redis_client = None
 except Exception as e:
     logger.error(f"Redis连接失败: {e}")
     redis_client = None
-
-# 从环境变量获取配置
-MAX_MONTHLY_SENDS = int(os.getenv('MAX_MONTHLY_SENDS', '4'))  # 每月最多发送次数
-SEND_TIME = os.getenv('SEND_TIME', '09:30')  # 发送时间，格式：HH:MM
-EXECUTION_INTERVAL_DAYS = int(os.getenv('EXECUTION_INTERVAL_DAYS', '7'))  # 执行间隔天数
-
-# 创建文件处理器 - 带轮转功能
-file_handler = RotatingFileHandler(
-    'log/netease_music_cron.log',
-    maxBytes=10 * 1024 * 1024,  # 10MB
-    backupCount=3,  # 最多保留3个备份
-    encoding='utf-8'
-)
-file_handler.setFormatter(formatter)
-
-# 创建控制台处理器
-stream_handler = logging.StreamHandler()
-stream_handler.setFormatter(formatter)
-
-# 添加处理器到 logger
-logger.addHandler(file_handler)
-logger.addHandler(stream_handler)
 
 
 # Redis存储管理函数
@@ -131,7 +123,6 @@ def should_execute_task(user_uid):
         current_month_count = monthly_sends.get(current_year_month, 0)
         
         if current_month_count >= MAX_MONTHLY_SENDS:
-            logger.info(f"用户 {user_uid} 本月已发送 {current_month_count} 次，已达每月上限 {MAX_MONTHLY_SENDS} 次，跳过本次任务")
             return False
         
         return True
@@ -167,6 +158,42 @@ def update_last_send_record(user_uid):
     else:
         logger.error(f"更新用户 {user_uid} 的最后发送记录失败")
 
+def retry_with_backoff(func, max_retries=3, delay=2, task_name="任务"):
+    """
+    重试装饰器函数，最多重试max_retries次，每次重试前等待delay秒
+    
+    Args:
+        func: 要执行的函数（无参数）
+        max_retries: 最大重试次数
+        delay: 重试间隔（秒）
+        task_name: 任务名称，用于日志
+    
+    Returns:
+        函数执行结果，如果所有重试都失败则返回None
+    """
+    for attempt in range(max_retries):
+        try:
+            result = func()
+            # 如果函数返回False或None表示失败，需要重试
+            if result is False or result is None:
+                if attempt < max_retries - 1:
+                    logger.warning(f"{task_name} 执行失败，{delay}秒后进行第 {attempt + 2} 次重试（共{max_retries}次）")
+                    time.sleep(delay)
+                    continue
+                else:
+                    logger.error(f"{task_name} 执行失败，已达最大重试次数 {max_retries} 次")
+                    return None
+            return result
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"{task_name} 执行异常: {e}，{delay}秒后进行第 {attempt + 2} 次重试（共{max_retries}次）")
+                time.sleep(delay)
+                continue
+            else:
+                logger.error(f"{task_name} 执行异常，已达最大重试次数 {max_retries} 次: {e}")
+                return None
+    return None
+
 def daily_task_runner():
     """每日任务执行函数（日常签到、音乐人签到等）"""
     logger.info(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 开始执行每日任务")
@@ -201,26 +228,57 @@ def daily_task_runner():
                     daily_task_res = task.daily_task()
                     logger.info(f"日常签到任务结果：{json.dumps(daily_task_res, ensure_ascii=False)[:100]}")
                     
-                    # 获取并执行音乐人签到任务
-                    musician_cycle_missions_res = task.get_musician_cycle_mission()
-                    if musician_cycle_missions_res.get('code') == 200:
-                        musician_cycle_missions_data = musician_cycle_missions_res.get('data', {})
-                        musician_cycle_missions_list = musician_cycle_missions_data.get('list', [])
-                        for mission in musician_cycle_missions_list:
-                            description = mission.get('description')
-                            if "签到" not in description:
-                                continue
-                            logger.info(f"发现签到任务：{description}")
-                            userMissionId = mission.get('userMissionId')
-                            period = mission.get('period')
-                            if userMissionId and period:
-                                logger.info(f"{description}：userMissionId={userMissionId}, period={period}")
-                                reward_obtain_res = task.reward_obtain(userMissionId, period)
-                                logger.info(f"{description}结果：{json.dumps(reward_obtain_res, ensure_ascii=False)[:100]}")
-                            else:
-                                logger.error(f"执行任务 {description} 失败：userMissionId={userMissionId}, period={period}")
-                    else:
-                        logger.error(f"获取音乐人循环任务失败：{json.dumps(musician_cycle_missions_res, ensure_ascii=False)[:100]}")
+                    # 获取并执行音乐人签到任务（带重试）
+                    def execute_musician_checkin():
+                        musician_cycle_missions_res = task.get_musician_cycle_mission()
+                        if musician_cycle_missions_res.get('code') == 200:
+                            musician_cycle_missions_data = musician_cycle_missions_res.get('data', {})
+                            musician_cycle_missions_list = musician_cycle_missions_data.get('list', [])
+                            success_count = 0
+                            has_checkin_mission = False
+                            missing_params = False
+                            
+                            for mission in musician_cycle_missions_list:
+                                description = mission.get('description')
+                                if "签到" not in description:
+                                    continue
+                                
+                                has_checkin_mission = True
+                                logger.info(f"发现签到任务：{description}")
+                                userMissionId = mission.get('userMissionId')
+                                period = mission.get('period')
+                                
+                                if userMissionId and period:
+                                    logger.info(f"{description}：userMissionId={userMissionId}, period={period}")
+                                    reward_obtain_res = task.reward_obtain(userMissionId, period)
+                                    logger.info(f"{description}结果：{json.dumps(reward_obtain_res, ensure_ascii=False)[:100]}")
+                                    if reward_obtain_res.get('code') == 200:
+                                        success_count += 1
+                                else:
+                                    logger.warning(f"任务 {description} 缺少必要参数：userMissionId={userMissionId}, period={period}")
+                                    missing_params = True  # 标记有参数缺失，但不立即返回，继续处理其他任务
+                            
+                            # 如果找到了签到任务但参数缺失，返回False触发重试
+                            if has_checkin_mission and missing_params:
+                                return False
+                            
+                            # 如果至少有一个签到任务成功，返回True
+                            if success_count > 0:
+                                return True
+                            
+                            # 如果没有找到签到任务，也算成功（可能已经签到过了）
+                            return True
+                        else:
+                            logger.error(f"获取音乐人循环任务失败：{json.dumps(musician_cycle_missions_res, ensure_ascii=False)[:100]}")
+                            return False  # 返回False触发重试
+                    
+                    # 使用重试机制执行音乐人签到任务
+                    retry_with_backoff(
+                        execute_musician_checkin,
+                        max_retries=3,
+                        delay=2,
+                        task_name=f"用户 {user['uid']} 的音乐人签到任务"
+                    )
                 else:
                     logger.error(f"用户 {user.get('uid')} 登录失败，无法执行每日任务")
             except Exception as e:
@@ -256,20 +314,59 @@ def interval_task_runner():
                     send_records = load_send_records()
                     user_record = send_records.get(str(user_uid), {})
                     last_send_date_str = user_record.get('last_send_date')
+                    
+                    skip_reason = ""
+                    next_execution_time = "未知"
+                    
                     if last_send_date_str:
                         try:
                             last_send_date = datetime.strptime(last_send_date_str, '%Y-%m-%d').date()
                             today = date.today()
-                            days_remaining = max(0, EXECUTION_INTERVAL_DAYS - (today - last_send_date).days)
-                            next_execution_date = today + timedelta(days=days_remaining)
+                            now = datetime.now()
+                            days_since_last_send = (today - last_send_date).days
+                            
+                            # 检查间隔天数是否满足
+                            if days_since_last_send < EXECUTION_INTERVAL_DAYS:
+                                # 间隔天数不足
+                                days_remaining = EXECUTION_INTERVAL_DAYS - days_since_last_send
+                                next_execution_date = today + timedelta(days=days_remaining)
+                                skip_reason = f"距离上次执行不足 {EXECUTION_INTERVAL_DAYS} 天（已过 {days_since_last_send} 天）"
+                            else:
+                                # 间隔天数已满足，检查每月发送次数
+                                current_year_month = today.strftime('%Y-%m')
+                                monthly_sends = user_record.get('monthly_sends', {})
+                                current_month_count = monthly_sends.get(current_year_month, 0)
+                                
+                                if current_month_count >= MAX_MONTHLY_SENDS:
+                                    # 每月发送次数已达上限，显示下个月1号的时间
+                                    year, month = map(int, current_year_month.split('-'))
+                                    if month == 12:
+                                        next_month_date = date(year + 1, 1, 1)
+                                    else:
+                                        next_month_date = date(year, month + 1, 1)
+                                    next_execution_date = next_month_date
+                                    skip_reason = f"本月已发送 {current_month_count} 次，已达每月上限 {MAX_MONTHLY_SENDS} 次"
+                                else:
+                                    # 间隔天数已满足，但今天执行时间已过
+                                    # SEND_TIME已在config.py中验证过，直接使用
+                                    send_hour, send_minute = map(int, SEND_TIME.split(':'))
+                                    send_time_today = datetime.combine(today, datetime.min.time().replace(hour=send_hour, minute=send_minute))
+                                    if now >= send_time_today:
+                                        next_execution_date = today + timedelta(days=1)
+                                        skip_reason = "间隔天数已满足，但今天执行时间已过"
+                                    else:
+                                        next_execution_date = today
+                                        skip_reason = "间隔天数已满足，等待执行时间"
+                            
                             next_execution_time = f"{next_execution_date.strftime('%Y-%m-%d')} {SEND_TIME}"
                         except Exception as e:
                             logger.error(f"计算预计下次执行时间时发生错误: {e}")
-                            next_execution_time = "未知"
+                            skip_reason = "计算时间时发生错误"
                     else:
+                        skip_reason = "没有发送记录"
                         next_execution_time = "下次定时检查时"
                     
-                    logger.info(f"用户 {user_uid} 距离上次执行不足 {EXECUTION_INTERVAL_DAYS} 天，跳过本次发布动态任务，预计下次执行时间{next_execution_time}")
+                    logger.info(f"用户 {user_uid} {skip_reason}，跳过本次发布动态任务，预计下次执行时间：{next_execution_time}")
                     continue
                 
                 client = None
@@ -284,10 +381,28 @@ def interval_task_runner():
                 if client:
                     logger.info(f"正在处理用户 {user['uid']} 的发布动态任务")
                     task = TaskManager(client)
-                    share_res = task.share_song()
-                    if share_res.get('code') == 200:
-                        logger.info(f"发布动态成功：{json.dumps(share_res, ensure_ascii=False)[:100]}")
-                        
+                    
+                    # 发布动态任务（带重试）
+                    share_res = None
+                    def execute_share_song():
+                        nonlocal share_res
+                        share_res = task.share_song()
+                        if share_res.get('code') == 200:
+                            logger.info(f"发布动态成功：{json.dumps(share_res, ensure_ascii=False)[:100]}")
+                            return True
+                        else:
+                            logger.warning(f"发布动态失败：{json.dumps(share_res, ensure_ascii=False)[:100]}")
+                            return False  # 返回False触发重试
+                    
+                    # 使用重试机制执行发布动态任务
+                    success = retry_with_backoff(
+                        execute_share_song,
+                        max_retries=3,
+                        delay=3,
+                        task_name=f"用户 {user['uid']} 的发布动态任务"
+                    )
+                    
+                    if success and share_res and share_res.get('code') == 200:
                         # 更新最后发送记录
                         update_last_send_record(user_uid)
                         
@@ -299,8 +414,8 @@ def interval_task_runner():
                             logger.info(f'删除动态结果: {delete_res}')
                         else:
                             logger.warning("删除动态失败：动态ID获取失败")
-                    else:
-                        logger.warning(f"发布动态失败：{json.dumps(share_res, ensure_ascii=False)[:100]}")
+                    elif not success:
+                        logger.error(f"用户 {user['uid']} 发布动态任务重试3次后仍然失败")
                 else:
                     logger.error(f"用户 {user['uid']} 登录失败，跳过发布动态任务")
             except Exception as e:
@@ -317,11 +432,20 @@ def main():
     """主函数"""
     logger.info("网易音乐人任务调度器启动")
     
+    # 从配置文件导入的SEND_TIME已经验证过，直接使用
+    hour, minute = map(int, SEND_TIME.split(':'))
+    
     # 创建调度器
     scheduler = BlockingScheduler(timezone='Asia/Shanghai')
     
-    # 从环境变量获取执行时间，格式：HH:MM
-    hour, minute = map(int, SEND_TIME.split(':'))
+    # 计算间隔任务的执行时间（每日任务时间 + 5分钟）
+    interval_minute = minute + 5
+    interval_hour = hour
+    if interval_minute >= 60:
+        interval_minute -= 60
+        interval_hour += 1
+        if interval_hour >= 24:
+            interval_hour -= 24
     
     try:
         # 添加每日任务 - 每天在指定时间执行
@@ -336,14 +460,14 @@ def main():
         # 添加间隔任务 - 每天在指定时间检查，但只在满足间隔天数时执行
         scheduler.add_job(
             func=interval_task_runner,
-            trigger=CronTrigger(hour=hour, minute=minute + 5, day_of_week='*'),  # 间隔5分钟执行，避免冲突
+            trigger=CronTrigger(hour=interval_hour, minute=interval_minute, day_of_week='*'),  # 间隔5分钟执行，避免冲突
             id='netease_interval_task',
             name='网易音乐人发布动态任务',
             replace_existing=True
         )
         
         logger.info(f"每日任务已添加，每天 {SEND_TIME} 执行")
-        logger.info(f"间隔任务已添加，每天 {hour}:{minute + 5:02d} 执行检查，实际执行间隔：每 {EXECUTION_INTERVAL_DAYS} 天")
+        logger.info(f"间隔任务已添加，每天 {interval_hour:02d}:{interval_minute:02d} 执行检查，实际执行间隔：每 {EXECUTION_INTERVAL_DAYS} 天")
         logger.info("任务调度器已启动，按 Ctrl+C 停止")
         
         # 启动调度器
