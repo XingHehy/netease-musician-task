@@ -394,11 +394,11 @@ class TaskManager:
             data=data
         )
     # 获取音乐人任务列表
-    def get_musician_cycle_mission(self):
+    def get_musician_cycle_mission(self,actionType="",platform=""):
         """获取音乐人任务列表"""
         data = {
-            "actionType": 102,
-            "platform": 200
+            "actionType": actionType,
+            "platform": platform
         }
         return self.client.request(
             'POST', 

@@ -255,7 +255,7 @@ def daily_task_runner():
                                     if reward_obtain_res.get('code') == 200:
                                         success_count += 1
                                 else:
-                                    logger.warning(f"任务 {description} 缺少必要参数：userMissionId={userMissionId}, period={period}")
+                                    logger.warning(f"任务 {description} 缺少必要参数：userMissionId={userMissionId}, period={period}\nmission={mission}")
                                     missing_params = True  # 标记有参数缺失，但不立即返回，继续处理其他任务
                             
                             # 如果找到了签到任务但参数缺失，返回False触发重试
