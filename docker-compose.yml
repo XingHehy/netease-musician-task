@@ -5,6 +5,7 @@ services:
     restart: always
     volumes:
       - ./log:/app/log
+      - ./playwright_profiles:/app/playwright_profiles
     environment:
       - TZ=Asia/Shanghai
       # Redis连接URL，格式：redis://[password@]host:port/db
@@ -15,6 +16,8 @@ services:
       - EXECUTION_INTERVAL_DAYS=7
       # 每月最大发送次数限制
       - MAX_MONTHLY_SENDS=4
+      # 登录方式
+      - LOGIN_METHOD=playwright
     logging:
       driver: "json-file"
       options:

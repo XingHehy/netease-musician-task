@@ -45,7 +45,7 @@ if not logger.handlers:
     logger.addHandler(stream_handler)
 
 # 从配置文件导入Redis配置
-from config import REDIS_POOL, REDIS_CONF
+from config import REDIS_POOL, REDIS_CONF, LOGIN_METHOD, PLAYWRIGHT_PROFILE_BASEDIR, PLAYWRIGHT_PROFILE_PER_USER
 
 
 # --- 1. 基础加解密工具类 ---
@@ -262,7 +262,37 @@ class AuthManager:
             logger.error(f"初始化Redis连接失败: {e}")
             self.redis = None
 
-    def login(self, phone, password, task_key=None):
+    def _get_uid_by_cookie(self, cookie_str: str):
+        """
+        使用浏览器 Cookie 调用一系列账号信息接口，提取 uid。
+        """
+        client = NeteaseClient(cookie_str=cookie_str)
+        candidates = [
+            ("GET", "/api/nuser/account/get", False, None),
+            ("GET", "/api/w/nuser/account/get", False, None),
+            ("GET", "/api/v1/user/info", False, None),
+            ("POST", "/weapi/w/nuser/account/get", True, {}),
+        ]
+        for method, path, encrypt, data in candidates:
+            try:
+                res = client.request(method, path, data=data, encrypt=encrypt)
+            except Exception as e:
+                logger.warning(f"通过 Cookie 获取 uid 失败：{method} {path} - {e}")
+                continue
+            if not isinstance(res, dict):
+                continue
+            uid = None
+            account = res.get("account") or {}
+            profile = res.get("profile") or {}
+            if isinstance(account, dict):
+                uid = account.get("id") or uid
+            if isinstance(profile, dict):
+                uid = profile.get("userId") or uid
+            if uid:
+                return int(uid)
+        return None
+
+    def _login_via_api(self, phone, password, task_key=None):
         client = NeteaseClient()
         pw_md5 = CryptoUtil.md5(password)
         data = {'phone': phone, 'password': pw_md5, 'rememberLogin': 'true'}
@@ -296,6 +326,66 @@ class AuthManager:
         else:
             logger.error(f"登录失败: {res.get('msg', res)}")
             return None
+
+    def _login_via_playwright(self, phone, password, task_key=None):
+        """
+        使用 Playwright 浏览器完成登录，并把 Cookie 写入 Redis，返回 NeteaseClient。
+        """
+        try:
+            from playwright_handle.login import browser_login  # 延迟导入，避免循环
+        except ImportError as e:
+            logger.error(f"导入 Playwright 登录模块失败: {e}")
+            return None
+
+        profile_dir = PLAYWRIGHT_PROFILE_BASEDIR
+        if PLAYWRIGHT_PROFILE_PER_USER:
+            # phone 可能包含 +86 等符号，简单做下目录安全化
+            safe_phone = "".join([c for c in str(phone) if c.isdigit()]) or str(phone)
+            profile_dir = os.path.join(PLAYWRIGHT_PROFILE_BASEDIR, safe_phone)
+
+        logger.info(f"使用 Playwright 为账号 {phone} 执行登录（profile={profile_dir}）...")
+        try:
+            cookie_str = browser_login(phone, password, profile_dir=profile_dir)
+        except Exception as e:
+            logger.error(f"Playwright 登录失败: {e}")
+            return None
+
+        if not cookie_str:
+            logger.error("Playwright 登录未获取到有效 Cookie")
+            return None
+
+        uid = self._get_uid_by_cookie(cookie_str)
+        if not uid:
+            logger.error("使用 Cookie 无法识别 uid，登录失败")
+            return None
+
+        client = NeteaseClient(cookie_str=cookie_str, uid=uid)
+
+        # 保存到 Redis
+        if not self._save_session(uid, cookie_str, {"uid": uid}):
+            logger.warning(f"用户 {uid} 登录成功但保存会话失败")
+
+        # 回写真实 UID
+        if task_key and self.redis:
+            try:
+                user_info_str = self.redis.hget('netease:music:task', task_key)
+                if user_info_str:
+                    user_info = json.loads(user_info_str)
+                    if str(user_info.get('uid')) != str(uid):
+                        user_info['uid'] = uid
+                        self.redis.hset('netease:music:task', task_key, json.dumps(user_info))
+                        logger.info(f"绑定真实 UID: {uid}")
+            except Exception as e:
+                logger.error(f"回写 UID 失败: {e}")
+
+        logger.info(f"用户 {uid} 通过 Playwright 登录成功")
+        return client
+
+    def login(self, phone, password, task_key=None):
+        if LOGIN_METHOD == 'playwright':
+            return self._login_via_playwright(phone, password, task_key)
+        # 默认走 API 登录
+        return self._login_via_api(phone, password, task_key)
 
     def get_client_by_uid(self, uid):
         if not uid or not self.redis:
@@ -394,15 +484,26 @@ class TaskManager:
             data=data
         )
     # 获取音乐人任务列表
-    def get_musician_cycle_mission(self,actionType="",platform=""):
+    def get_musician_cycle_mission(self,actionType="102",platform="200"):
         """获取音乐人任务列表"""
+        csrf = self.client.csrf_token
+        check_token = CryptoUtil.generate_check_token()
         data = {
-            "actionType": actionType,
-            "platform": platform
+            "actionType": actionType,  # 102
+            "platform": platform,  # 200
+            "csrf_token": csrf,  # 不传也行
         }
+        # 注意：音乐人接口对 checkToken 更敏感；生成失败时传空字符串可能会触发 301/风控
+        if check_token:
+            data["checkToken"] = check_token
+        else:
+            logger.warning(
+                "checkToken 生成失败（缺少 JS 运行时/Node.js 或 execjs 不可用），将不携带 checkToken 请求音乐人接口；"
+                "若仍返回 301，请安装 Node.js 并确保在 PATH 中可执行 `node`。"
+            )
         return self.client.request(
             'POST', 
-            f'/weapi/nmusician/workbench/mission/cycle/list', 
+            f'/weapi/nmusician/workbench/mission/cycle/list?csrf_token={csrf}',
             data=data
         )
 
@@ -439,9 +540,9 @@ class TaskManager:
         msg = f"{time.strftime('%Y年%m月%d日%H:%M:%S')}早上好"
 
         # check_token = ""  # 省略 checkToken 读取逻辑
-        #
-        # check_token = CryptoUtil.generate_check_token()
-        # uuid = CryptoUtil.generate_publish_uuid()
+
+        check_token = CryptoUtil.generate_check_token()
+        uuid = CryptoUtil.generate_publish_uuid()
 
         # 确保 csrf_token 存在
         csrf = self.client.csrf_token
@@ -451,10 +552,16 @@ class TaskManager:
             "id": song_id,
             "type": "song",
             "msg": msg,
-            # "checkToken": check_token, # 要么传真的，要么不传或传空字符串
-            # "uuid": uuid, # 不传也行
-            # "csrf_token": csrf # 不传也行
+            "uuid": uuid, # 不传也行
+            "csrf_token": csrf # 不传也行
         }
+        if check_token:
+            params["checkToken"] = check_token
+        else:
+            logger.warning(
+                "checkToken 生成失败（缺少 JS 运行时/Node.js 或 execjs 不可用），将不携带 checkToken 进行分享请求；"
+                "若分享接口返回 301，请安装 Node.js 并确保在 PATH 中可执行 `node`。"
+            )
         return self.client.request('POST', f'/weapi/share/friends/resource?csrf_token={csrf}', params)
 
     # 删除动态
@@ -482,7 +589,7 @@ if __name__ == '__main__':
             else:
                 logger.info(f"用户 {user.get('phone')} 没有有效的UID，将直接登录")
 
-            # 2. 失败则登录
+            # 2. 失败则登录（仅当 LOGIN_METHOD=api 时才会真正走接口）
             if not client:
                 client = auth.login(user['phone'], user['password'], task_key=user['task_key'])
 
@@ -490,10 +597,13 @@ if __name__ == '__main__':
                 logger.info(f"正在处理用户 {user['uid']}")
                 task = TaskManager(client)
 
-                daily_task_res = task.daily_task()
-                logger.info(f"日常签到任务结果：{json.dumps(daily_task_res, ensure_ascii=False)[:100]}")
-
                 musician_cycle_missions_res = task.get_musician_cycle_mission()
+                if musician_cycle_missions_res.get('code') == 301:
+                    logger.warning(f"用户 {user['uid']} 音乐人接口返回 301，触发自动登录后重试一次")
+                    client = auth.login(user['phone'], user['password'], task_key=user.get('task_key'))
+                    if client:
+                        task = TaskManager(client)
+                        musician_cycle_missions_res = task.get_musician_cycle_mission()
                 if musician_cycle_missions_res.get('code') == 200:
                     musician_cycle_missions_data = musician_cycle_missions_res.get('data', {})
                     musician_cycle_missions_list = musician_cycle_missions_data.get('list', [])
@@ -516,6 +626,12 @@ if __name__ == '__main__':
 
                 logger.info(f"开始音乐人发布动态任务：")
                 share_res = task.share_song()
+                if share_res.get('code') == 301:
+                    logger.warning(f"用户 {user['uid']} 分享接口返回 301，触发自动登录后重试一次")
+                    client = auth.login(user['phone'], user['password'], task_key=user.get('task_key'))
+                    if client:
+                        task = TaskManager(client)
+                        share_res = task.share_song()
                 if share_res.get('code') == 200:
                     logger.info(f"发布动态成功：{json.dumps(share_res, ensure_ascii=False)[:100]}")
                     id_ = share_res.get('event', {}).get('id')
@@ -528,6 +644,15 @@ if __name__ == '__main__':
                         logger.warning("删除动态失败：动态ID获取失败")
                 else:
                     logger.warning(f"发布动态失败：{json.dumps(share_res, ensure_ascii=False)[:100]}")
+
+                daily_task_res = task.daily_task()
+                if daily_task_res.get('code') == 301:
+                    logger.warning(f"用户 {user['uid']} 日常签到接口返回 301，触发自动登录后重试一次")
+                    client = auth.login(user['phone'], user['password'], task_key=user.get('task_key'))
+                    if client:
+                        task = TaskManager(client)
+                        daily_task_res = task.daily_task()
+                logger.info(f"日常签到任务结果：{json.dumps(daily_task_res, ensure_ascii=False)[:100]}")
             else:
                 logger.error(f"用户 {user.get('phone')} 无法获取有效的客户端实例")
         except Exception as e:

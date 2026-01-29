@@ -2,3 +2,6 @@ pycryptodome>=3.14.0
 requests>=2.26.0
 redis>=4.2.0
 apscheduler>=3.10.0
+PyExecJS>=1.5.0
+playwright>=1.40.0
+ddddocr>=1.5.5

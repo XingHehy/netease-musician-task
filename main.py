@@ -13,7 +13,9 @@ from core import AuthManager, TaskManager, logger
 # 从配置文件导入所有配置
 from config import (
     REDIS_KEY, REDIS_CONF, REDIS_POOL,
-    MAX_MONTHLY_SENDS, SEND_TIME, EXECUTION_INTERVAL_DAYS
+    MAX_MONTHLY_SENDS, SEND_TIME, EXECUTION_INTERVAL_DAYS,
+    LOGIN_METHOD,
+    PLAYWRIGHT_PROFILE_BASEDIR, PLAYWRIGHT_PROFILE_PER_USER,
 )
 
 import os
@@ -216,7 +218,7 @@ def daily_task_runner():
                 if user['uid'] and str(user['uid']) != str(user['phone']):
                     client = auth.get_client_by_uid(user['uid'])
                 
-                # 2. 失败则登录
+                # 2. 失败则登录（仅当 LOGIN_METHOD=api 时才会真正走接口）
                 if not client:
                     client = auth.login(user['phone'], user['password'], task_key=user['task_key'])
                 
@@ -224,13 +226,20 @@ def daily_task_runner():
                     logger.info(f"正在处理用户 {user['uid']} 的每日任务")
                     task = TaskManager(client)
                     
-                    # 执行日常签到任务
-                    daily_task_res = task.daily_task()
-                    logger.info(f"日常签到任务结果：{json.dumps(daily_task_res, ensure_ascii=False)[:100]}")
+
                     
                     # 获取并执行音乐人签到任务（带重试）
                     def execute_musician_checkin():
+                        nonlocal client, task
                         musician_cycle_missions_res = task.get_musician_cycle_mission()
+                        # 遇到 301（未登录）时，触发自动登录并重试
+                        if musician_cycle_missions_res.get('code') == 301:
+                            logger.warning(f"用户 {user['uid']} 音乐人接口返回 301，尝试自动登录刷新 Cookie 后重试")
+                            new_client = auth.login(user['phone'], user['password'], task_key=user.get('task_key'))
+                            if new_client:
+                                client = new_client
+                                task = TaskManager(client)
+                            return False
                         if musician_cycle_missions_res.get('code') == 200:
                             musician_cycle_missions_data = musician_cycle_missions_res.get('data', {})
                             musician_cycle_missions_list = musician_cycle_missions_data.get('list', [])
@@ -279,6 +288,11 @@ def daily_task_runner():
                         delay=2,
                         task_name=f"用户 {user['uid']} 的音乐人签到任务"
                     )
+
+                    # 执行日常签到任务
+                    daily_task_res = task.daily_task()
+                    logger.info(f"日常签到任务结果：{json.dumps(daily_task_res, ensure_ascii=False)[:100]}")
+
                 else:
                     logger.error(f"用户 {user.get('uid')} 登录失败，无法执行每日任务")
             except Exception as e:
@@ -374,7 +388,7 @@ def interval_task_runner():
                 if user['uid'] and str(user['uid']) != str(user['phone']):
                     client = auth.get_client_by_uid(user['uid'])
                 
-                # 2. 失败则登录
+                # 2. 失败则登录（仅当 LOGIN_METHOD=api 时才会真正走接口）
                 if not client:
                     client = auth.login(user['phone'], user['password'], task_key=user['task_key'])
                 
@@ -385,8 +399,38 @@ def interval_task_runner():
                     # 发布动态任务（带重试）
                     share_res = None
                     def execute_share_song():
+                        nonlocal client, task
                         nonlocal share_res
-                        share_res = task.share_song()
+                        if LOGIN_METHOD == 'playwright':
+                            # 用浏览器发布（避免 code=250 安全验证分享异常）
+                            from playwright_handle.friend import share_note_and_delete
+
+                            profile_dir = PLAYWRIGHT_PROFILE_BASEDIR
+                            if PLAYWRIGHT_PROFILE_PER_USER:
+                                safe_phone = "".join([c for c in str(user.get('phone')) if c.isdigit()]) or str(user.get('phone'))
+                                profile_dir = os.path.join(PLAYWRIGHT_PROFILE_BASEDIR, safe_phone)
+
+                            msg = f"{datetime.now().strftime('%Y年%m月%d日%H:%M:%S')}早上好"
+                            # 将当前可用的 cookie 注入到浏览器；若仍未登录则用账号密码再走一次登录流程
+                            ok = share_note_and_delete(
+                                profile_dir,
+                                msg,
+                                search_keyword="你好",
+                                cookie_str=client.get_cookie_str(),
+                                phone=user.get("phone"),
+                                password=user.get("password"),
+                            )
+                            share_res = {"code": 200} if ok else {"code": 250, "msg": "playwright share failed"}
+                        else:
+                            share_res = task.share_song()
+                        # 遇到 301（未登录）时，触发自动登录并重试
+                        if share_res.get('code') == 301:
+                            logger.warning(f"用户 {user['uid']} 分享接口返回 301，尝试自动登录刷新 Cookie 后重试")
+                            new_client = auth.login(user['phone'], user['password'], task_key=user.get('task_key'))
+                            if new_client:
+                                client = new_client
+                                task = TaskManager(client)
+                            return False
                         if share_res.get('code') == 200:
                             logger.info(f"发布动态成功：{json.dumps(share_res, ensure_ascii=False)[:100]}")
                             return True
@@ -405,15 +449,17 @@ def interval_task_runner():
                     if success and share_res and share_res.get('code') == 200:
                         # 更新最后发送记录
                         update_last_send_record(user_uid)
-                        
-                        id_ = share_res.get('event', {}).get('id')
-                        if id_:
-                            logger.info("等待 10 秒后删除动态")
-                            time.sleep(10)
-                            delete_res = task.delete_dynamic(id_)
-                            logger.info(f'删除动态结果: {delete_res}')
-                        else:
-                            logger.warning("删除动态失败：动态ID获取失败")
+
+                        # playwright 分支内部已负责监听分享接口并删除动态，这里不再重复删除
+                        if LOGIN_METHOD != 'playwright':
+                            id_ = share_res.get('event', {}).get('id')
+                            if id_:
+                                logger.info("等待 10 秒后删除动态")
+                                time.sleep(10)
+                                delete_res = task.delete_dynamic(id_)
+                                logger.info(f'删除动态结果: {delete_res}')
+                            else:
+                                logger.warning("删除动态失败：动态ID获取失败")
                     elif not success:
                         logger.error(f"用户 {user['uid']} 发布动态任务重试3次后仍然失败")
                 else:

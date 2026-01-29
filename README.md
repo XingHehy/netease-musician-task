@@ -29,6 +29,7 @@
 
 - Python >= 3.8
 - Redis 服务
+- Node.js（推荐）：用于通过 `execjs` 执行 `checkToken.js` 生成 `checkToken`。如果缺少可用的 JS 运行时，音乐人相关接口可能返回 `301 用户未登陆`。
 - Docker (可选，用于容器化部署)
 
 ## 安装步骤
@@ -44,6 +45,18 @@ cd wyy-musician
 
 ```bash
 pip install -r requirements.txt
+```
+
+### 2.1 （可选）使用 Playwright 网页登录一次，写入 Cookie 到 Redis
+
+当接口登录容易触发 `301 用户未登陆/风控` 时，建议用 Playwright 先在网页端登录一次，让脚本复用网页 Cookie：
+
+```bash
+# 安装浏览器（只需一次）
+python -m playwright install chromium
+
+# 打开网易云音乐网页，手动扫码/登录，完成后自动写入 Cookie 到 Redis
+python playwright_handle/login.py
 ```
 
 ### 3. 配置Redis
@@ -115,6 +128,9 @@ export EXECUTION_INTERVAL_DAYS="7"
 
 # 设置每月最大发送次数限制
 export MAX_MONTHLY_SENDS="4"
+
+# 登录方式
+export LOGIN_METHOD="playwright"
 ```
 
 执行逻辑说明：
@@ -144,7 +160,7 @@ docker-compose up -d
 如果不使用 Docker Compose，也可以直接使用 `docker run` 命令启动容器：
 
 ```bash
-docker run -d --name netease-musician-task -e TZ=Asia/Shanghai -e REDIS_URL="redis://localhost:6379/0" -e SEND_TIME="09:30" -e EXECUTION_INTERVAL_DAYS="7" -e MAX_MONTHLY_SENDS="4" --restart always netease-musician-task:latest
+docker run -d --name netease-musician-task -e TZ=Asia/Shanghai -e REDIS_URL="redis://localhost:6379/0" -e SEND_TIME="09:30" -e EXECUTION_INTERVAL_DAYS="7" -e MAX_MONTHLY_SENDS="4" -e LOGIN_METHOD="playwright" --restart always netease-musician-task:latest
 ```
 
 

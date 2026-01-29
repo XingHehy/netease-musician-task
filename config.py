@@ -60,6 +60,21 @@ def init_redis():
 # 初始化Redis连接池
 init_redis()
 
+# ========== 登录方式配置 ==========
+# LOGIN_METHOD 可选：
+# - 'api'        使用 /weapi/login/cellphone 接口登录（默认）
+# - 'playwright' 不再走密码登录接口，只依赖 Playwright 网页登录生成的 Cookie
+LOGIN_METHOD = os.getenv('LOGIN_METHOD', 'playwright').strip().lower()
+if LOGIN_METHOD not in ('api', 'playwright'):
+    _logger.warning(f"未知的 LOGIN_METHOD={LOGIN_METHOD}，已回退为 'playwright'")
+    LOGIN_METHOD = 'playwright'
+
+# ========== Playwright 配置 ==========
+# Playwright profile 根目录（存 cookies/cache/localStorage 等）
+PLAYWRIGHT_PROFILE_BASEDIR = os.getenv('PLAYWRIGHT_PROFILE_BASEDIR', '.playwright_profiles')
+# 多账号是否隔离 profile（建议 True，避免多账号串 Cookie）
+PLAYWRIGHT_PROFILE_PER_USER = os.getenv('PLAYWRIGHT_PROFILE_PER_USER', '1').strip() not in ('0', 'false', 'False')
+
 # ========== 任务调度配置 ==========
 MAX_MONTHLY_SENDS = int(os.getenv('MAX_MONTHLY_SENDS', '4'))  # 每月最多发送次数
 

@@ -2,3 +2,5 @@ log/
 __pycache__/
 *.pyc
 .idea/
+.playwright_profiles/
+.playwright_profiles_netease/
