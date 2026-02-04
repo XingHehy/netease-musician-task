@@ -308,7 +308,7 @@ def browser_login(phone: str, password: str, profile_dir: str = PROFILE_DIR) -> 
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
             user_data_dir=profile_dir,
-            headless=False,
+            headless=True,
             viewport={"width": 1280, "height": 800},
         )
         page = context.new_page()

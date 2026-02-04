@@ -205,6 +205,9 @@ wyy-musician/
 MIT License
 
 ## 更新日志
+- v1.3.1
+  - 添加playwright获取音乐人任务方式，避免userMissionId获取失败
+  
 - v1.3.0
   - 添加playwright登录、分享方式，避免出现“安全验证分享异常”
   - 添加任务执行失败重试机制，提高任务成功率

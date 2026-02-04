@@ -109,5 +109,5 @@ except ValueError as e:
     _logger.error(f"使用默认值 09:30")
     SEND_TIME = '09:30'  # 使用默认值
 
-EXECUTION_INTERVAL_DAYS = int(os.getenv('EXECUTION_INTERVAL_DAYS', '7'))  # 执行间隔天数
+EXECUTION_INTERVAL_DAYS = int(os.getenv('EXECUTION_INTERVAL_DAYS', '3'))  # 执行间隔天数
 

@@ -507,6 +507,32 @@ class TaskManager:
             data=data
         )
 
+    def get_musician_cycle_mission_by_playwright(
+        self,
+        profile_dir: str,
+        *,
+        phone: str | None = None,
+        password: str | None = None,
+        actionType: str = "102",
+        platform: str = "200",
+        timeout_ms: int = 30000,
+    ):
+        """
+        使用 Playwright 打开音乐人后台页面并监听 cycle/list 接口返回。
+        适用于直接 weapi 调用易触发 301/风控（checkToken 敏感）的场景。
+        """
+        from playwright_handle.musician import get_musician_cycle_mission_by_playwright
+
+        return get_musician_cycle_mission_by_playwright(
+            profile_dir,
+            cookie_str=self.client.get_cookie_str(),
+            phone=phone,
+            password=password,
+            actionType=actionType,
+            platform=platform,
+            timeout_ms=timeout_ms,
+        )
+
     # 领取音乐人云豆签到任务
     def reward_obtain(self, userMissionId, period):
         """领取音乐人云豆签到任务"""
@@ -624,35 +650,35 @@ if __name__ == '__main__':
                 else:
                     logger.error(f"获取音乐人循环任务失败：{json.dumps(musician_cycle_missions_res, ensure_ascii=False)[:100]}")
 
-                logger.info(f"开始音乐人发布动态任务：")
-                share_res = task.share_song()
-                if share_res.get('code') == 301:
-                    logger.warning(f"用户 {user['uid']} 分享接口返回 301，触发自动登录后重试一次")
-                    client = auth.login(user['phone'], user['password'], task_key=user.get('task_key'))
-                    if client:
-                        task = TaskManager(client)
-                        share_res = task.share_song()
-                if share_res.get('code') == 200:
-                    logger.info(f"发布动态成功：{json.dumps(share_res, ensure_ascii=False)[:100]}")
-                    id_ = share_res.get('event', {}).get('id')
-                    if id_:
-                        logger.info("等待 10 秒后删除动态")
-                        time.sleep(10)
-                        delete_res = task.delete_dynamic(id_)
-                        logger.info(f'删除动态结果: {delete_res}')
-                    else:
-                        logger.warning("删除动态失败：动态ID获取失败")
-                else:
-                    logger.warning(f"发布动态失败：{json.dumps(share_res, ensure_ascii=False)[:100]}")
-
-                daily_task_res = task.daily_task()
-                if daily_task_res.get('code') == 301:
-                    logger.warning(f"用户 {user['uid']} 日常签到接口返回 301，触发自动登录后重试一次")
-                    client = auth.login(user['phone'], user['password'], task_key=user.get('task_key'))
-                    if client:
-                        task = TaskManager(client)
-                        daily_task_res = task.daily_task()
-                logger.info(f"日常签到任务结果：{json.dumps(daily_task_res, ensure_ascii=False)[:100]}")
+                # logger.info(f"开始音乐人发布动态任务：")
+                # share_res = task.share_song()
+                # if share_res.get('code') == 301:
+                #     logger.warning(f"用户 {user['uid']} 分享接口返回 301，触发自动登录后重试一次")
+                #     client = auth.login(user['phone'], user['password'], task_key=user.get('task_key'))
+                #     if client:
+                #         task = TaskManager(client)
+                #         share_res = task.share_song()
+                # if share_res.get('code') == 200:
+                #     logger.info(f"发布动态成功：{json.dumps(share_res, ensure_ascii=False)[:100]}")
+                #     id_ = share_res.get('event', {}).get('id')
+                #     if id_:
+                #         logger.info("等待 10 秒后删除动态")
+                #         time.sleep(10)
+                #         delete_res = task.delete_dynamic(id_)
+                #         logger.info(f'删除动态结果: {delete_res}')
+                #     else:
+                #         logger.warning("删除动态失败：动态ID获取失败")
+                # else:
+                #     logger.warning(f"发布动态失败：{json.dumps(share_res, ensure_ascii=False)[:100]}")
+                #
+                # daily_task_res = task.daily_task()
+                # if daily_task_res.get('code') == 301:
+                #     logger.warning(f"用户 {user['uid']} 日常签到接口返回 301，触发自动登录后重试一次")
+                #     client = auth.login(user['phone'], user['password'], task_key=user.get('task_key'))
+                #     if client:
+                #         task = TaskManager(client)
+                #         daily_task_res = task.daily_task()
+                # logger.info(f"日常签到任务结果：{json.dumps(daily_task_res, ensure_ascii=False)[:100]}")
             else:
                 logger.error(f"用户 {user.get('phone')} 无法获取有效的客户端实例")
         except Exception as e:

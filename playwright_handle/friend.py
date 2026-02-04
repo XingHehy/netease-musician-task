@@ -89,7 +89,7 @@ def share_note_and_delete(
         with sync_playwright() as p:
             context = p.chromium.launch_persistent_context(
                 user_data_dir=profile_dir,
-                headless=False,
+                headless=True,
                 viewport={"width": 1280, "height": 800},
             )
             page = context.new_page()

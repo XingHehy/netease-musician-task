@@ -231,7 +231,19 @@ def daily_task_runner():
                     # 获取并执行音乐人签到任务（带重试）
                     def execute_musician_checkin():
                         nonlocal client, task
-                        musician_cycle_missions_res = task.get_musician_cycle_mission()
+                        if LOGIN_METHOD == "playwright":
+                            # 用浏览器打开音乐人后台并监听 cycle/list（规避 checkToken/风控 301）
+                            profile_dir = PLAYWRIGHT_PROFILE_BASEDIR
+                            if PLAYWRIGHT_PROFILE_PER_USER:
+                                safe_phone = "".join([c for c in str(user.get("phone")) if c.isdigit()]) or str(user.get("phone"))
+                                profile_dir = os.path.join(PLAYWRIGHT_PROFILE_BASEDIR, safe_phone)
+                            musician_cycle_missions_res = task.get_musician_cycle_mission_by_playwright(
+                                profile_dir,
+                                phone=user.get("phone"),
+                                password=user.get("password"),
+                            )
+                        else:
+                            musician_cycle_missions_res = task.get_musician_cycle_mission()
                         # 遇到 301（未登录）时，触发自动登录并重试
                         if musician_cycle_missions_res.get('code') == 301:
                             logger.warning(f"用户 {user['uid']} 音乐人接口返回 301，尝试自动登录刷新 Cookie 后重试")
