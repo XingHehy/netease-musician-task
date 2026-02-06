@@ -14,6 +14,7 @@ from core import logger, NeteaseClient, TaskManager
 
 FRIEND_URL = "https://music.163.com/#/friend"
 PROFILE_DIR = ".playwright_profile_netease"  # 作为独立脚本运行时使用；集成到 main.py 时会传参覆盖
+VIP_RIGHT_URL = "https://y.music.163.com/g/yida/7d4d0e9f89884a68b8eddea50b5aa6a6"
 
 
 def _scopes(page: Page | Frame):
@@ -71,6 +72,79 @@ def _cookie_str_to_playwright_cookies(cookie_str: str) -> list[dict]:
             }
         )
     return cookies
+
+
+def _log_vip_task_progress(page: Page) -> None:
+    """
+    进入音乐人权益页，监听 VIP 任务进度接口：
+    https://interface.music.163.com/weapi/nmusician/workbench/special/right/vip/info
+
+    从返回中找到名称为「即日起30天内发布图文笔记天数≥4」的任务，
+    并在日志中打印 totalCompleteNum / progressRate。
+    """
+    target_task_name = "即日起30天内发布图文笔记天数≥4"
+
+    def _is_target(resp) -> bool:
+        try:
+            return (
+                "nmusician/workbench/special/right/vip/info" in resp.url
+                and "interface.music.163.com" in resp.url
+                and resp.request.method == "POST"
+            )
+        except Exception:
+            return False
+
+    logger.info("打开音乐人权益页，监听 VIP 任务进度接口...")
+    try:
+        with page.expect_response(_is_target, timeout=30000) as resp_info:
+            # 打开 y.music 的活动页，页面内部会自动请求目标接口
+            page.goto(VIP_RIGHT_URL, wait_until="domcontentloaded")
+        resp = resp_info.value
+    except Exception as e:
+        logger.warning(f"未能捕获 VIP 任务进度接口响应：{e}")
+        return
+
+    try:
+        data = resp.json()
+    except Exception as e:
+        try:
+            raw_text = resp.text()
+        except Exception:
+            raw_text = ""
+        logger.warning(f"解析 VIP 任务进度接口 JSON 失败：{e}，原始内容片段：{raw_text[:300]}")
+        return
+
+    logger.info(f"VIP 任务接口返回：{str(data)[:300]}")
+
+    try:
+        further = (data or {}).get("data", {}).get("furtherTask", {})
+        children = further.get("children") or []
+        if not isinstance(children, list) or not children:
+            logger.warning("VIP 任务返回中 furtherTask.children 为空或不是列表")
+            return
+
+        found = False
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            # 文案字段可能叫 description / name / title，尽量多兜一下
+            desc = child.get("description") or child.get("name") or child.get("title") or ""
+            if desc == target_task_name:
+                total = child.get("totalCompleteNum")
+                progress = child.get("progressRate")
+                logger.info(
+                    f"发现任务「{target_task_name}」：totalCompleteNum={total}，progressRate={progress}"
+                )
+                found = True
+                break
+
+        if not found:
+            logger.warning(
+                f"在 furtherTask.children 中未找到名称为「{target_task_name}」的任务，"
+                f"children 数量={len(children)}"
+            )
+    except Exception as e:
+        logger.warning(f"解析 VIP 任务进度数据时出错：{e}")
 
 def share_note_and_delete(
     profile_dir: str,
@@ -170,7 +244,13 @@ def share_note_and_delete(
                 context.close()
                 return False
 
-            # 8. 删除动态（复用核心 TaskManager）
+            # 8. 发布成功后，进入音乐人权益页，监听并打印 VIP 任务进度
+            try:
+                _log_vip_task_progress(page)
+            except Exception as e:
+                logger.warning(f"获取 VIP 任务进度时发生异常：{e}")
+
+            # 9. 删除动态（复用核心 TaskManager）
             logger.info(f"分享成功，event_id={event_id}，等待 10 秒后删除动态...")
             time.sleep(10)
             cookies = context.cookies("https://music.163.com")

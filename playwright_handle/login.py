@@ -12,7 +12,7 @@ import time
 import logging
 from typing import Optional
 
-import ddddocr
+from ddddocr import DdddOcr
 from playwright.sync_api import sync_playwright, Page, Frame
 
 from core import NeteaseClient  # 仅用于本模块内部根据 Cookie 识别 uid
@@ -170,88 +170,249 @@ def _check_first(page: Page | Frame, selector: str, *, timeout: int = 15000):
 
 def solve_slider_captcha(page: Page | Frame, max_retry: int = 3):
     """
-    使用 ddddocr 识别网易云「滑块/拼图」验证码，并模拟拖动滑块。
-    只做基础逻辑，失败会尝试刷新重试几次。
+    网易云 yidun 滑块高成功率版本（修复 OpenCV 尺寸断言错误）
+    - 真滑块判断（naturalWidth）
+    - 直接下载原图（非 screenshot）
+    - 小尺寸偏移修正
+    - 人类拖动轨迹
+    - 新增尺寸校验：确保滑块图 ≤ 背景图（解决 OpenCV 断言错误）
     """
-    ocr = ddddocr.DdddOcr(det=False, ocr=False)
+
+    def wait_real_image(scope, selector, min_width=120, timeout=10000):
+        scope.wait_for_function(
+            f"""
+            () => {{
+                const img = document.querySelector("{selector}");
+                return img && img.complete && img.naturalWidth > {min_width};
+            }}
+            """,
+            timeout=timeout
+        )
+
+    def download_img(scope, selector) -> bytes:
+        src = scope.locator(selector).first.get_attribute("src")
+        if not src:
+            raise RuntimeError("图片 src 为空")
+        import requests
+        # 1. 下载图片并解析尺寸
+        resp = requests.get(src, timeout=10)
+        resp.raise_for_status()
+        # 2. 用PIL校验图片实际尺寸（避免naturalWidth欺骗）
+        from io import BytesIO
+        from PIL import Image
+        try:
+            img = Image.open(BytesIO(resp.content))
+            img_width, img_height = img.size
+            # 3. 强制校验：背景图≥100x100，滑块图≥30x30（根据网易云实际情况调整）
+            if "bg-img" in selector and (img_width < 100 or img_height < 100):
+                raise RuntimeError(f"背景图尺寸异常：{img_width}x{img_height}")
+            if "jigsaw" in selector and (img_width < 30 or img_height < 30):
+                raise RuntimeError(f"滑块图尺寸异常：{img_width}x{img_height}")
+        except Exception as e:
+            # 4. 尺寸异常：自动点击刷新按钮，并重抛异常触发重试
+            logger.warning(f"图片尺寸校验失败，自动刷新验证码：{e}")
+            scope.locator(".yidun_refresh").first.click()
+            time.sleep(1)
+            raise RuntimeError(f"图片无效，已刷新：{e}")
+        return resp.content
+
+    def is_sms_mode(scope):
+        return scope.locator(".yidun_smsbox, .yidun_voice").count() > 0
+
+    # 等验证码弹窗
+    modal_found = False
+    for _ in range(30):
+        for scope in _scopes(page):
+            if scope.locator(".yidun_modal__body, .yidun.yidun-custom").count() > 0:
+                modal_found = True
+                break
+        if modal_found:
+            break
+        time.sleep(0.3)
+
+    if not modal_found:
+        logger.info("未触发验证码，跳过滑块验证")
+        return
+
+    # 优先使用 ddddocr 的 slide_match（修正参数顺序 + 尺寸校验，避免其内部 OpenCV 断言）
+    # 同时保留 OpenCV 匹配作为兜底方案
+    ocr = DdddOcr(det=False, ocr=False, show_ad=False)
+    import cv2
+    import numpy as np
 
     for attempt in range(1, max_retry + 1):
-        logger.info(f"尝试第 {attempt} 次滑块验证...")
+        logger.info(f"[滑块] 第 {attempt} 次尝试")
 
-        bg_bytes = None
-        slider_bytes = None
-        scope_used: Optional[Page | Frame] = None
-
-        # 1. 在所有 frame 里找到背景图和滑块图
         for scope in _scopes(page):
             try:
-                bg = scope.locator(".yidun_bg-img").first
-                slider = scope.locator(".yidun_jigsaw").first
-                if bg.count() == 0 or slider.count() == 0:
-                    continue
-                bg_bytes = bg.screenshot(type="png")
-                slider_bytes = slider.screenshot(type="png")
-                scope_used = scope
-                break
-            except Exception:
+                # 等待真实图片加载（避免加载占位图）
+                wait_real_image(scope, "img.yidun_bg-img")
+                wait_real_image(scope, "img.yidun_jigsaw", min_width=40)
+
+                # 下载背景图和滑块图
+                bg_bytes = download_img(scope, "img.yidun_bg-img")
+                slider_bytes = download_img(scope, "img.yidun_jigsaw")
+
+                # 校验图片有效性
+                if len(bg_bytes) < 5000 or len(slider_bytes) < 1000:
+                    raise RuntimeError(f"图片异常（背景图大小：{len(bg_bytes)}，滑块图大小：{len(slider_bytes)}）")
+
+                # ========== 核心修复：尺寸校验 + ddddocr 优先，OpenCV 匹配兜底 ==========
+                # 将字节流转换为 OpenCV 灰度图像
+                bg_img = cv2.imdecode(np.frombuffer(bg_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
+                slider_img = cv2.imdecode(np.frombuffer(slider_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
+
+                if bg_img is None or slider_img is None:
+                    raise RuntimeError("OpenCV 无法解码验证码图片")
+
+                # 获取图片尺寸（高, 宽）
+                bg_h, bg_w = bg_img.shape[:2]
+                slider_h, slider_w = slider_img.shape[:2]
+                logger.info(f"[滑块] 图片尺寸 - 背景图：{bg_w}x{bg_h}，滑块图：{slider_w}x{slider_h}")
+
+                # 确保模板（滑块）不会比背景图大，避免 ddddocr / OpenCV matchTemplate 尺寸断言错误
+                if slider_w > bg_w or slider_h > bg_h:
+                    raise RuntimeError(
+                        f"滑块图尺寸超过背景图（{slider_w}x{slider_h} > {bg_w}x{bg_h}），跳过本次匹配"
+                    )
+
+                # 优先使用 ddddocr 的 slide_match：
+                # 关键点：按照“小图在前、背景在后”的顺序传参，避免其内部 OpenCV 尺寸断言
+                try:
+                    res = ocr.slide_match(slider_bytes, bg_bytes)
+                    target_x = float(res["target"][0])
+                    logger.info(f"[滑块] ddddocr 识别位移：{target_x:.2f} 像素")
+                except Exception as e:
+                    logger.warning(f"[滑块] ddddocr.slide_match 失败：{e}，改用 OpenCV 匹配")
+                    # 使用 OpenCV 模板匹配查找滑块在背景图中的 X 方向偏移
+                    result = cv2.matchTemplate(bg_img, slider_img, cv2.TM_CCOEFF_NORMED)
+                    _, max_val, _, max_loc = cv2.minMaxLoc(result)
+                    target_x = max_loc[0]
+                    logger.info(f"[滑块] OpenCV 匹配得分：{max_val:.4f}，原始位移：{target_x:.2f} 像素")
+
+                # 小尺寸 yidun 偏移修正（关键）
+                target_x *= 1.03
+
+                logger.info(f"[滑块] 修正后位移：{target_x:.2f} 像素")
+
+                # 获取滑块位置，准备拖动
+                slider = scope.locator(".yidun_slider__icon").first
+                box = slider.bounding_box()
+                if not box:
+                    raise RuntimeError("无法获取滑块位置，跳过本次拖动")
+
+                start_x = box["x"] + box["width"] / 2
+                start_y = box["y"] + box["height"] / 2
+
+                # 人类模拟拖动轨迹（避免被风控）
+                page.mouse.move(start_x, start_y)
+                page.mouse.down()
+
+                total = target_x
+                cur = 0
+                while cur < total:
+                    step = min(total - cur, max(2, cur * 0.08))  # 先慢后快
+                    cur += step
+                    # 轻微上下抖动，模拟人类操作
+                    page.mouse.move(start_x + cur, start_y + (0.5 - time.time() % 1))
+                    time.sleep(0.015)
+
+                # 轻微回拉（反机器人风控）
+                page.mouse.move(start_x + total - 2, start_y, steps=2)
+                time.sleep(0.05)
+                page.mouse.move(start_x + total, start_y, steps=2)
+
+                page.mouse.up()
+                time.sleep(2)  # 等待验证结果
+
+                # 验证成功判断：滑块元素消失
+                if scope.locator(".yidun_slider__icon").count() == 0:
+                    logger.info("[滑块] 验证码验证成功！")
+                    return
+
+                # 验证失败，刷新验证码后重试
+                if attempt < max_retry:
+                    logger.info(f"[滑块] 第 {attempt} 次失败，刷新验证码重试")
+                    scope.locator(".yidun_refresh").first.click()
+                    time.sleep(1.5)  # 等待新验证码加载
+
+            except cv2.error as e:
+                # 捕获 OpenCV 相关错误，单独兜底
+                logger.warning(f"[滑块] OpenCV 处理失败：{str(e)}，跳过本次尝试")
+                if attempt < max_retry:
+                    time.sleep(1)
+                continue
+            except Exception as e:
+                # 捕获其他所有异常，避免流程中断
+                logger.warning(f"[滑块] 第 {attempt} 次尝试失败：{str(e)}")
                 continue
 
-        if not bg_bytes or not slider_bytes or scope_used is None:
-            logger.warning("未找到滑块验证码图片，可能当前没有触发滑块。")
-            return
+    logger.error(f"[滑块] 累计 {max_retry} 次尝试均失败，放弃滑块验证（请手动完成或检查网络/验证码样式）")
 
-        # 2. 用 ddddocr 计算位移
-        try:
-            match_res = ocr.slide_match(target=bg_bytes, slider=slider_bytes)
-            # 返回格式一般为 {"target": [x, y], "slider": [w, h]}
-            target_x = match_res["target"][0]
-        except Exception as e:
-            logger.warning(f"ddddocr 识别滑块失败: {e}")
-            return
 
-        logger.info(f"滑块目标位移（粗略）: {target_x}")
-
-        # 3. 找到滑块控件并拖动
-        try:
-            slider_handle = scope_used.locator(".yidun_slider__icon, .yidun_slider").first
-            box = slider_handle.bounding_box()
-            if not box:
-                logger.warning("无法获取滑块控件的 bounding_box")
-                return
-
-            start_x = box["x"] + box["width"] / 2
-            start_y = box["y"] + box["height"] / 2
-
-            # Playwright 鼠标拖动
-            scope_used.page.mouse.move(start_x, start_y)
-            scope_used.page.mouse.down()
-            # 留一点冗余，避免不够
-            end_x = start_x + target_x * 1.05
-            steps = 30
-            for i in range(steps):
-                x = start_x + (end_x - start_x) * (i + 1) / steps
-                scope_used.page.mouse.move(x, start_y, steps=1)
-                time.sleep(0.02)
-            scope_used.page.mouse.up()
-
-            # 拖动结束后稍等，看是否还在
-            time.sleep(2)
-            # 如果控件还存在且提示失败，可以点刷新再重试一次
-            if attempt < max_retry:
-                try:
-                    refresh_btn = scope_used.locator(".yidun_refresh").first
-                    if refresh_btn.count() > 0:
-                        refresh_btn.click()
-                        time.sleep(1)
-                        continue
-                except Exception:
-                    pass
-            break
-        except Exception as e:
-            logger.warning(f"模拟拖动滑块失败: {e}")
-            if attempt >= max_retry:
-                return
-            time.sleep(1)
+def check_secondary_verification(page: Page | Frame, timeout: int = 10) -> bool:
+    """
+    检查是否需要二次验证（登录安全验证弹窗）。
+    如果出现二次验证弹窗，记录日志并返回 True。
+    
+    返回:
+        True: 检测到二次验证弹窗
+        False: 未检测到二次验证弹窗
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for scope in _scopes(page):
+            try:
+                # 检查是否存在"登录安全验证"弹窗
+                # 使用多个选择器提高检测准确性
+                modal = scope.locator(".mrc-modal-container")
+                title = scope.get_by_text("登录安全验证", exact=False)
+                
+                if modal.count() > 0 and title.count() > 0:
+                    logger.warning("[二次验证] 检测到登录安全验证弹窗，需要额外验证")
+                    
+                    # 检查可用的验证方式
+                    verification_options = scope.locator(".mjZhxAab")
+                    option_count = verification_options.count()
+                    
+                    if option_count > 0:
+                        logger.info(f"[二次验证] 发现 {option_count} 种验证方式")
+                        
+                        # 尝试查找"原设备确认"选项（通常是最简单的验证方式）
+                        # 遍历所有选项，查找包含"原设备确认"文本的选项
+                        for i in range(option_count):
+                            try:
+                                option = verification_options.nth(i)
+                                option_text = option.locator("span.DwyRKeOe").first.inner_text(timeout=1000)
+                                if "原设备确认" in option_text:
+                                    logger.info("[二次验证] 尝试点击「原设备确认」")
+                                    option.click()
+                                    time.sleep(2)
+                                    # 检查弹窗是否消失
+                                    if scope.locator(".mrc-modal-container").count() == 0:
+                                        logger.info("[二次验证] 原设备确认成功，弹窗已关闭")
+                                        return False
+                                    break
+                            except Exception:
+                                continue
+                        
+                        # 如果自动处理失败，记录需要手动处理
+                        logger.warning(
+                            "[二次验证] 无法自动完成二次验证，请手动选择验证方式：\n"
+                            "  - 短信验证\n"
+                            "  - 原设备确认\n"
+                            "  - 原设备扫码验证\n"
+                            "  - 微信授权验证"
+                        )
+                        return True
+                    
+            except Exception:
+                continue
+        
+        time.sleep(0.5)
+    
+    logger.debug("[二次验证] 未检测到二次验证弹窗")
+    return False
 
 
 def do_login_with_phone(page: Page | Frame, phone: str, password: str):
@@ -308,7 +469,7 @@ def browser_login(phone: str, password: str, profile_dir: str = PROFILE_DIR) -> 
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
             user_data_dir=profile_dir,
-            headless=True,
+            headless=False,
             viewport={"width": 1280, "height": 800},
         )
         page = context.new_page()
@@ -323,6 +484,24 @@ def browser_login(phone: str, password: str, profile_dir: str = PROFILE_DIR) -> 
             solve_slider_captcha(page)
         except Exception as e:
             logger.warning(f"滑块验证码处理过程出错：{e}")
+
+        # 滑块验证完成后，检查是否需要二次验证
+        try:
+            needs_secondary = check_secondary_verification(page, timeout=10)
+            if needs_secondary:
+                logger.warning("[登录] 检测到需要二次验证，等待用户手动完成...")
+                # 循环检查，最多等待 120 秒，直到二次验证弹窗消失
+                secondary_deadline = time.time() + 120
+                while time.time() < secondary_deadline:
+                    still_needs = check_secondary_verification(page, timeout=2)
+                    if not still_needs:
+                        logger.info("[登录] 二次验证已完成，继续登录流程")
+                        break
+                    time.sleep(2)
+                else:
+                    logger.warning("[登录] 二次验证等待超时，继续尝试获取 Cookie")
+        except Exception as e:
+            logger.warning(f"检查二次验证时出错：{e}")
 
         deadline = time.time() + 60
         cookie_str = ""

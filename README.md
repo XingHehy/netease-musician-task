@@ -205,6 +205,9 @@ wyy-musician/
 MIT License
 
 ## 更新日志
+- v1.3.2
+  - Dockerfile把加上Playwright浏览器安装命令
+
 - v1.3.1
   - 添加playwright获取音乐人任务方式，避免userMissionId获取失败
   

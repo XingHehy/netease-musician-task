@@ -3,4 +3,4 @@ __pycache__/
 *.pyc
 .idea/
 .playwright_profiles/
-.playwright_profiles_netease/
+*/.playwright_profile_netease
