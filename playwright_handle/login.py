@@ -8,8 +8,10 @@
 from __future__ import annotations
 
 import os
+import random
 import time
 import logging
+import urllib.parse
 from typing import Optional
 
 from ddddocr import DdddOcr
@@ -24,8 +26,8 @@ logger = logging.getLogger("netease_music")
 LOGIN_URL = "https://music.163.com/#/login?targetUrl=https%3A%2F%2Fmusic.163.com%2Fst%2Fmusician"
 
 # 作为脚本直接运行时的默认账号（集成到 main.py 时会传参覆盖）
-PHONE = "17600000000"
-PASSWORD = "your-password"
+PHONE = input("手机号：")
+PASSWORD = input("密码：")
 
 # 如果你知道自己的 uid，可以直接填；否则留 None，由后续逻辑识别
 FIXED_UID: Optional[int] = None
@@ -126,6 +128,44 @@ def _click_first(page: Page | Frame, locator_or_text: str, *, exact_text: bool =
                 continue
         time.sleep(0.1)
     raise last_err or RuntimeError(f"无法点击目标：{locator_or_text}")
+
+
+def _try_click_if_visible(page: Page | Frame, text: str, *, exact_text: bool = True, timeout_ms: int = 3000) -> bool:
+    """
+    若在 timeout 内找到可点击的文本则点击并返回 True，否则不抛错、返回 False。
+    用于「有则点一下」的场景（如滑块成功后可能再次出现「密码登录」选项卡）。
+    """
+    deadline = time.time() + max(0.5, timeout_ms / 1000)
+    while time.time() < deadline:
+        for scope in _scopes(page):
+            try:
+                if exact_text:
+                    loc = scope.get_by_text(text, exact=True)
+                else:
+                    loc = scope.locator(f"text={text}")
+                if loc.count() == 0:
+                    continue
+                loc.first.wait_for(state="visible", timeout=500)
+                loc.first.click()
+                return True
+            except Exception:
+                continue
+        time.sleep(0.2)
+    return False
+
+
+def _has_yidun_slider_modal(page: Page | Frame) -> bool:
+    """
+    快速判断是否出现 yidun 滑块弹窗/容器（不等待，只做存在性检测）。
+    用于避免重复调用 solve_slider_captcha() 造成多次“未触发验证码”的噪音与耗时。
+    """
+    try:
+        for scope in _scopes(page):
+            if scope.locator(".yidun_modal__body, .yidun.yidun-custom").count() > 0:
+                return True
+    except Exception:
+        return False
+    return False
 
 
 def _fill_first(page: Page | Frame, selector: str, value: str, *, timeout: int = 15000):
@@ -292,7 +332,7 @@ def solve_slider_captcha(page: Page | Frame, max_retry: int = 3):
 
                 # 小尺寸 yidun 偏移修正（关键）
                 target_x *= 1.03
-
+                target_x += 3.5
                 logger.info(f"[滑块] 修正后位移：{target_x:.2f} 像素")
 
                 # 获取滑块位置，准备拖动
@@ -330,12 +370,12 @@ def solve_slider_captcha(page: Page | Frame, max_retry: int = 3):
                     logger.info("[滑块] 验证码验证成功！")
                     return
 
-                # 验证失败，刷新验证码后重试
+                # 验证失败，刷新验证码后重试：必须 break 出内层 scope 循环，下一轮 attempt 再重新扫 scope 等新图
                 if attempt < max_retry:
                     logger.info(f"[滑块] 第 {attempt} 次失败，刷新验证码重试")
                     scope.locator(".yidun_refresh").first.click()
-                    time.sleep(1.5)  # 等待新验证码加载
-
+                    time.sleep(2)  # 等新验证码 DOM 与图片加载
+                    break  # 跳出 for scope，进入下一 attempt，重新从第一个 scope 开始等新图
             except cv2.error as e:
                 # 捕获 OpenCV 相关错误，单独兜底
                 logger.warning(f"[滑块] OpenCV 处理失败：{str(e)}，跳过本次尝试")
@@ -350,7 +390,7 @@ def solve_slider_captcha(page: Page | Frame, max_retry: int = 3):
     logger.error(f"[滑块] 累计 {max_retry} 次尝试均失败，放弃滑块验证（请手动完成或检查网络/验证码样式）")
 
 
-def check_secondary_verification(page: Page | Frame, timeout: int = 10) -> bool:
+def check_secondary_verification(page: Page | Frame, timeout: int = 10, *, auto_action: bool = True) -> bool:
     """
     检查是否需要二次验证（登录安全验证弹窗）。
     如果出现二次验证弹窗，记录日志并返回 True。
@@ -363,13 +403,16 @@ def check_secondary_verification(page: Page | Frame, timeout: int = 10) -> bool:
     while time.time() < deadline:
         for scope in _scopes(page):
             try:
-                # 检查是否存在"登录安全验证"弹窗
-                # 使用多个选择器提高检测准确性
                 modal = scope.locator(".mrc-modal-container")
                 title = scope.get_by_text("登录安全验证", exact=False)
                 
-                if modal.count() > 0 and title.count() > 0:
+                # 有时弹窗标题文案会变化，不能强依赖 title；只要容器存在就认为进入二次验证流程
+                if modal.count() > 0:
                     logger.warning("[二次验证] 检测到登录安全验证弹窗，需要额外验证")
+                    pw_page: Page = page if isinstance(page, Page) else page.page
+
+                    if not auto_action:
+                        return True
                     
                     # 检查可用的验证方式
                     verification_options = scope.locator(".mjZhxAab")
@@ -377,9 +420,53 @@ def check_secondary_verification(page: Page | Frame, timeout: int = 10) -> bool:
                     
                     if option_count > 0:
                         logger.info(f"[二次验证] 发现 {option_count} 种验证方式")
-                        
-                        # 尝试查找"原设备确认"选项（通常是最简单的验证方式）
-                        # 遍历所有选项，查找包含"原设备确认"文本的选项
+
+                        # 优先：原设备扫码验证（可生成二维码供手机扫码确认）
+                        for i in range(option_count):
+                            try:
+                                option = verification_options.nth(i)
+                                option_text = option.locator("span.DwyRKeOe").first.inner_text(timeout=1000)
+                                if "原设备扫码验证" in option_text:
+                                    logger.info("[二次验证] 尝试点击「原设备扫码验证」并抓取 pollingToken")
+                                    try:
+                                        with pw_page.expect_response(
+                                            lambda r: "/weapi/login/origin-device/scan-apply/start" in r.url,
+                                            timeout=15000,
+                                        ) as resp_info:
+                                            option.click()
+                                        resp = resp_info.value
+                                        payload = resp.json()
+                                        polling_token = (
+                                            (payload or {})
+                                            .get("data", {})
+                                            .get("pollingToken")
+                                        )
+                                        if polling_token:
+                                            qr_uri = (
+                                                "orpheus://rnpage?"
+                                                "component=rn-account-verify&isTheme=true&immersiveMode=true&route=confirmOldDevice"
+                                                f"&pollingToken={polling_token}"
+                                            )
+                                            qr_url = (
+                                                "https://api.pwmqr.com/qrcode/create/?url="
+                                                + urllib.parse.quote(qr_uri, safe="")
+                                            )
+                                            logger.warning(f"[二次验证] 扫码二维码链接：{qr_url}")
+                                            # 标记：已进入扫码验证流程，后续应至少等待一段时间给用户扫码
+                                            try:
+                                                setattr(pw_page, "_secondary_scan_started_at", time.time())
+                                            except Exception:
+                                                pass
+                                        else:
+                                            logger.warning(f"[二次验证] 未从接口返回中提取到 pollingToken：{payload}")
+                                    except Exception as e:
+                                        logger.warning(f"[二次验证] 监听 scan-apply/start 接口失败：{e}")
+                                        option.click()
+                                    return True
+                            except Exception:
+                                continue
+
+                        # 其次：原设备确认（有些情况还需要再输入验证码，成功率不如扫码）
                         for i in range(option_count):
                             try:
                                 option = verification_options.nth(i)
@@ -441,14 +528,17 @@ def do_login_with_phone(page: Page | Frame, phone: str, password: str):
     # 注意：这一步经常出现在主文档的弹窗里，所以要重新在所有 scope 中找
     _click_first(page, "密码登录", exact_text=True, timeout=20000)
     logger.info("已点击「密码登录」")
+    time.sleep(random.uniform(0.2, 0.5))
 
     # 5. 输入手机号
     _fill_first(page, "input[placeholder='请输入手机号']", phone)
     logger.info("已输入手机号")
+    time.sleep(random.uniform(0.2, 0.5))
 
     # 6. 输入密码
     _fill_first(page, "input[placeholder='请输入密码']", password)
     logger.info("已输入密码")
+    time.sleep(random.uniform(0.2, 0.5))
 
     # 7. 点击「登录」
     _click_first(page, "a:has(div:has-text('登录'))")
@@ -469,7 +559,7 @@ def browser_login(phone: str, password: str, profile_dir: str = PROFILE_DIR) -> 
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
             user_data_dir=profile_dir,
-            headless=False,
+            headless=True,
             viewport={"width": 1280, "height": 800},
         )
         page = context.new_page()
@@ -485,15 +575,54 @@ def browser_login(phone: str, password: str, profile_dir: str = PROFILE_DIR) -> 
         except Exception as e:
             logger.warning(f"滑块验证码处理过程出错：{e}")
 
+        # 少数情况下：滑块成功后会回到「密码登录」选项卡，需要重新点并再次触发滑块
+        # 这里避免无条件重复 solve_slider_captcha()，否则会出现多次“未触发验证码”的日志与耗时
+        for _ in range(3):
+            time.sleep(1)
+            if not _try_click_if_visible(page, "密码登录", exact_text=True, timeout_ms=2500):
+                break
+            logger.info("[登录] 检测到密码登录选项卡再次出现，已重新点击「密码登录」，继续执行输入与登录")
+            time.sleep(random.uniform(0.2, 0.5))
+            _fill_first(page, "input[placeholder='请输入手机号']", phone)
+            time.sleep(random.uniform(0.2, 0.5))
+            _fill_first(page, "input[placeholder='请输入密码']", password)
+            time.sleep(random.uniform(0.2, 0.5))
+            _click_first(page, "a:has(div:has-text('登录'))", timeout=10000)
+            time.sleep(random.uniform(0.2, 0.5))
+            logger.info("[登录] 已重新输入账号密码并点击登录")
+
+            # 只有检测到滑块容器时才处理滑块
+            if _has_yidun_slider_modal(page):
+                try:
+                    solve_slider_captcha(page)
+                except Exception as e:
+                    logger.warning(f"滑块验证码处理过程出错：{e}")
+
         # 滑块验证完成后，检查是否需要二次验证
         try:
             needs_secondary = check_secondary_verification(page, timeout=10)
             if needs_secondary:
                 logger.warning("[登录] 检测到需要二次验证，等待用户手动完成...")
-                # 循环检查，最多等待 120 秒，直到二次验证弹窗消失
+                # 扫码验证：最多等 60 秒，每 5 秒检查一次；用户提前完成就立刻继续
+                try:
+                    started_at = getattr(page, "_secondary_scan_started_at", None)
+                except Exception:
+                    started_at = None
+                if started_at:
+                    logger.warning("[登录] 已生成扫码二维码链接，开始轮询等待（每 5 秒检查一次，最多 60 秒）...")
+                    scan_deadline = time.time() + 60
+                    while time.time() < scan_deadline:
+                        # 被动检测：不重复点击/不重复生成二维码
+                        still_needs_scan = check_secondary_verification(page, timeout=2, auto_action=False)
+                        if not still_needs_scan:
+                            logger.info("[登录] 二次验证已完成（扫码），继续登录流程")
+                            break
+                        time.sleep(5)
+
+                # 循环检查，最多等待 120 秒，直到二次验证弹窗消失（被动检测）
                 secondary_deadline = time.time() + 120
                 while time.time() < secondary_deadline:
-                    still_needs = check_secondary_verification(page, timeout=2)
+                    still_needs = check_secondary_verification(page, timeout=2, auto_action=False)
                     if not still_needs:
                         logger.info("[登录] 二次验证已完成，继续登录流程")
                         break

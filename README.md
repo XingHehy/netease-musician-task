@@ -205,6 +205,10 @@ wyy-musician/
 MIT License
 
 ## 更新日志
+- v1.3.3
+  - 优化docker构建，提升构建效率和缓存利用率
+  - 修改二次验证方式为原设备扫码验证，优化登录流程
+
 - v1.3.2
   - Dockerfile把加上Playwright浏览器安装命令
 

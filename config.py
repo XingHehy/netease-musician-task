@@ -100,7 +100,7 @@ def validate_send_time(send_time):
         raise ValueError(f"SEND_TIME格式错误：应为 HH:MM 格式（例如 09:30），当前值：{send_time}") from e
 
 # 获取并验证SEND_TIME
-_send_time_raw = os.getenv('SEND_TIME', '20:29')
+_send_time_raw = os.getenv('SEND_TIME', '09:30')
 try:
     validate_send_time(_send_time_raw)
     SEND_TIME = _send_time_raw
