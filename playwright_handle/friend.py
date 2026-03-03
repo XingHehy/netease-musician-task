@@ -74,13 +74,23 @@ def _cookie_str_to_playwright_cookies(cookie_str: str) -> list[dict]:
     return cookies
 
 
-def _log_vip_task_progress(page: Page) -> None:
+def _log_vip_task_progress(
+    page: Page,
+    *,
+    vip_further_get_time_callback=None,
+) -> int | None:
     """
     进入音乐人权益页，监听 VIP 任务进度接口：
     https://interface.music.163.com/weapi/nmusician/workbench/special/right/vip/info
 
     从返回中找到名称为「即日起30天内发布图文笔记天数≥4」的任务，
     并在日志中打印 totalCompleteNum / progressRate。
+
+    同时从返回中提取 data.furtherVipGetTime（毫秒时间戳，表示下次可领取 VIP 的时间）。
+    若提供 vip_further_get_time_callback，则在解析到该字段时回调传出 int(ms)。
+
+    返回：
+    - furtherVipGetTime（int，毫秒时间戳）或 None
     """
     target_task_name = "即日起30天内发布图文笔记天数≥4"
 
@@ -102,7 +112,7 @@ def _log_vip_task_progress(page: Page) -> None:
         resp = resp_info.value
     except Exception as e:
         logger.warning(f"未能捕获 VIP 任务进度接口响应：{e}")
-        return
+        return None
 
     try:
         data = resp.json()
@@ -112,16 +122,38 @@ def _log_vip_task_progress(page: Page) -> None:
         except Exception:
             raw_text = ""
         logger.warning(f"解析 VIP 任务进度接口 JSON 失败：{e}，原始内容片段：{raw_text[:300]}")
-        return
+        return None
 
     logger.info(f"VIP 任务接口返回：{str(data)[:300]}")
+
+    further_vip_get_time = None
+    try:
+        further_vip_get_time = (data or {}).get("data", {}).get("furtherVipGetTime")
+        if isinstance(further_vip_get_time, str) and further_vip_get_time.isdigit():
+            further_vip_get_time = int(further_vip_get_time)
+        elif isinstance(further_vip_get_time, (int, float)):
+            further_vip_get_time = int(further_vip_get_time)
+        else:
+            further_vip_get_time = None
+
+        if further_vip_get_time:
+            logger.info(f"解析到 furtherVipGetTime={further_vip_get_time}（下次可领取 VIP 的时间，ms）")
+            if vip_further_get_time_callback:
+                try:
+                    vip_further_get_time_callback(further_vip_get_time)
+                except Exception as e:
+                    logger.warning(f"执行 vip_further_get_time_callback 失败：{e}")
+        else:
+            logger.warning("未从 VIP 接口返回中解析到 data.furtherVipGetTime")
+    except Exception as e:
+        logger.warning(f"解析 furtherVipGetTime 时出错：{e}")
 
     try:
         further = (data or {}).get("data", {}).get("furtherTask", {})
         children = further.get("children") or []
         if not isinstance(children, list) or not children:
             logger.warning("VIP 任务返回中 furtherTask.children 为空或不是列表")
-            return
+            return further_vip_get_time
 
         found = False
         for child in children:
@@ -145,6 +177,78 @@ def _log_vip_task_progress(page: Page) -> None:
             )
     except Exception as e:
         logger.warning(f"解析 VIP 任务进度数据时出错：{e}")
+    return further_vip_get_time
+
+
+def open_vip_right_page_and_listen(
+    profile_dir: str,
+    *,
+    cookie_str: str | None = None,
+    phone: str | None = None,
+    password: str | None = None,
+    timeout_ms: int = 30000,
+    vip_further_get_time_callback=None,
+) -> int | None:
+    """
+    独立打开 VIP_RIGHT_URL，并监听 vip/info 接口，返回 furtherVipGetTime（ms）。
+    用途：在“下次可领取 VIP 的那一天”打开页面即可自动领取，然后更新下一次可领取时间。
+    """
+    os.makedirs("log", exist_ok=True)
+
+    def _run_once(_cookie_str: str | None) -> int | None:
+        with sync_playwright() as p:
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=profile_dir,
+                headless=True,
+                viewport={"width": 1280, "height": 800},
+            )
+            page = context.new_page()
+
+            # 先注入 cookie（如果有），避免打开后是未登录态
+            if _cookie_str:
+                try:
+                    pw_cookies = _cookie_str_to_playwright_cookies(_cookie_str)
+                    if pw_cookies:
+                        context.add_cookies(pw_cookies)
+                        logger.info(f"已注入 Cookie 到浏览器（{len(pw_cookies)} 条）")
+                except Exception as e:
+                    logger.warning(f"注入 Cookie 失败：{e}")
+
+            # _log_vip_task_progress 内部会 goto VIP_RIGHT_URL 并 expect_response
+            try:
+                # 复用 timeout：expect_response 需要显式传入
+                # 这里通过临时 monkey patch 的方式不优雅；直接在 _log_vip_task_progress 内固定 30s，
+                # 因此这里用 page.set_default_timeout 来尽量一致。
+                try:
+                    page.set_default_timeout(timeout_ms)
+                except Exception:
+                    pass
+                further_time = _log_vip_task_progress(
+                    page,
+                    vip_further_get_time_callback=vip_further_get_time_callback,
+                )
+            finally:
+                context.close()
+            return further_time
+
+    # 第一次尝试：用传入 cookie 注入（如果有）
+    res = _run_once(cookie_str)
+    if res:
+        return res
+
+    # 若未成功且给了账号密码，则执行登录刷新 profile，再重试一次
+    if phone and password:
+        logger.info("首次未成功解析 furtherVipGetTime，尝试 Playwright 登录刷新浏览器态后重试一次...")
+        from playwright_handle.login import browser_login
+
+        try:
+            new_cookie_str = browser_login(phone, password, profile_dir=profile_dir)
+        except Exception as e:
+            logger.error(f"Playwright 登录失败：{e}")
+            return None
+        return _run_once(new_cookie_str)
+
+    return res
 
 def share_note_and_delete(
     profile_dir: str,
@@ -153,6 +257,7 @@ def share_note_and_delete(
     cookie_str: str | None = None,
     phone: str | None = None,
     password: str | None = None,
+    vip_further_get_time_callback=None,
 ) -> bool:
     """
     供 main.py 调用：用浏览器发布笔记（配音乐）并监听分享接口返回，拿到 event_id 后等待删除。
@@ -246,7 +351,7 @@ def share_note_and_delete(
 
             # 8. 发布成功后，进入音乐人权益页，监听并打印 VIP 任务进度
             try:
-                _log_vip_task_progress(page)
+                _log_vip_task_progress(page, vip_further_get_time_callback=vip_further_get_time_callback)
             except Exception as e:
                 logger.warning(f"获取 VIP 任务进度时发生异常：{e}")
 

@@ -65,6 +65,73 @@ except Exception as e:
     logger.error(f"Redis连接失败: {e}")
     redis_client = None
 
+VIP_FURTHER_GET_TIME_KEY_TPL = "netease:music:user:{uid}:vip:furtherVipGetTime"
+
+
+def _vip_key(user_uid) -> str:
+    return VIP_FURTHER_GET_TIME_KEY_TPL.format(uid=str(user_uid))
+
+
+def get_vip_further_get_time_ms(user_uid) -> int | None:
+    """从 Redis 获取用户下次可领取 VIP 的时间（ms）。"""
+    if not redis_client:
+        return None
+    try:
+        v = redis_client.get(_vip_key(user_uid))
+        if v is None:
+            return None
+        if isinstance(v, (bytes, bytearray)):
+            v = v.decode("utf-8", errors="ignore")
+        v = str(v).strip()
+        if not v:
+            return None
+        # 兼容存成 JSON/字符串数字的场景
+        if v.isdigit():
+            return int(v)
+        try:
+            obj = json.loads(v)
+            if isinstance(obj, (int, float)):
+                return int(obj)
+            if isinstance(obj, str) and obj.isdigit():
+                return int(obj)
+        except Exception:
+            pass
+    except Exception as e:
+        logger.error(f"读取用户 {user_uid} 的 VIP furtherVipGetTime 失败: {e}")
+    return None
+
+
+def set_vip_further_get_time_ms(user_uid, ms: int) -> None:
+    """把用户下次可领取 VIP 的时间（ms）存到 Redis。"""
+    if not redis_client:
+        return
+    try:
+        redis_client.set(_vip_key(user_uid), str(int(ms)))
+    except Exception as e:
+        logger.error(f"保存用户 {user_uid} 的 VIP furtherVipGetTime 失败: {e}")
+
+
+def is_vip_due(user_uid, *, now_ms: int | None = None) -> bool:
+    """
+    判断当前是否需要为该用户打开 VIP_RIGHT_URL 领取/刷新：
+    - Redis 为空：需要执行（用于补偿初始化/异常漏跑）
+    - Redis 时间 <= 当前时间：需要执行（到期或已过期，需补执行）
+    - Redis 时间 > 当前时间：不需要执行（未到期，跳过检测）
+    """
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    next_ms = get_vip_further_get_time_ms(user_uid)
+    if not next_ms:
+        return True
+    return int(next_ms) <= int(now_ms)
+
+
+def _fmt_ms(ms: int) -> str:
+    try:
+        return datetime.fromtimestamp(int(ms) / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return str(ms)
+
 
 # Redis存储管理函数
 def load_send_records():
@@ -335,6 +402,56 @@ def interval_task_runner():
             try:
                 # 检查是否应该执行任务（距离上次执行>=设置的间隔天数）
                 user_uid = user.get('uid', user.get('phone'))
+
+                # 1) VIP 到期/过期补执行：打开权益页即可自动领取，并更新下一次可领取时间
+                #    未到期则完全跳过该检测（避免打扰“发布动态间隔检测”日志/流程）。
+                if LOGIN_METHOD == "playwright":
+                    try:
+                        if is_vip_due(user_uid):
+                            logger.info(
+                                f"用户 {user_uid} 到达/超过下次 VIP 领取时间（或无记录），将打开权益页尝试自动领取并刷新时间..."
+                            )
+
+                            # 获取可用 client（用于拿 cookie 注入浏览器）
+                            client = None
+                            if user.get("uid") and str(user.get("uid")) != str(user.get("phone")):
+                                client = auth.get_client_by_uid(user.get("uid"))
+                            if not client:
+                                client = auth.login(user.get("phone"), user.get("password"), task_key=user.get("task_key"))
+                            if not client:
+                                logger.error(f"用户 {user_uid} 无法获取有效登录态，跳过本次 VIP 权益页打开")
+                            else:
+                                from playwright_handle.friend import open_vip_right_page_and_listen
+
+                                profile_dir = PLAYWRIGHT_PROFILE_BASEDIR
+                                if PLAYWRIGHT_PROFILE_PER_USER:
+                                    safe_phone = "".join([c for c in str(user.get("phone")) if c.isdigit()]) or str(user.get("phone"))
+                                    profile_dir = os.path.join(PLAYWRIGHT_PROFILE_BASEDIR, safe_phone)
+
+                                def _on_vip_time(ms: int):
+                                    set_vip_further_get_time_ms(user_uid, ms)
+                                    logger.info(f"用户 {user_uid} 已更新下次可领取 VIP 时间：{_fmt_ms(ms)}（ms={ms}）")
+
+                                ms = open_vip_right_page_and_listen(
+                                    profile_dir,
+                                    cookie_str=client.get_cookie_str(),
+                                    phone=user.get("phone"),
+                                    password=user.get("password"),
+                                    vip_further_get_time_callback=_on_vip_time,
+                                )
+
+                                if ms:
+                                    # 再次兜底写入（即使回调没触发）
+                                    set_vip_further_get_time_ms(user_uid, int(ms))
+                                    logger.info(f"用户 {user_uid} 本次权益页监听完成，下次可领取 VIP 时间：{_fmt_ms(ms)}（ms={ms}）")
+                                else:
+                                    logger.warning(f"用户 {user_uid} 本次权益页未解析到 furtherVipGetTime（将下次继续补偿执行）")
+
+                            # 当天以“领取 VIP”为主，不再进行发布动态的间隔检测/执行
+                            continue
+                    except Exception as e:
+                        logger.error(f"用户 {user_uid} 执行 VIP 权益页逻辑时发生异常: {e}")
+
                 if not should_execute_task(user_uid):
                     # 计算预计下次执行时间
                     send_records = load_send_records()
@@ -431,6 +548,7 @@ def interval_task_runner():
                                 cookie_str=client.get_cookie_str(),
                                 phone=user.get("phone"),
                                 password=user.get("password"),
+                                vip_further_get_time_callback=lambda ms: set_vip_further_get_time_ms(user_uid, int(ms)),
                             )
                             share_res = {"code": 200} if ok else {"code": 250, "msg": "playwright share failed"}
                         else:
