@@ -26,8 +26,7 @@ logger = logging.getLogger("netease_music")
 LOGIN_URL = "https://music.163.com/#/login?targetUrl=https%3A%2F%2Fmusic.163.com%2Fst%2Fmusician"
 
 # 作为脚本直接运行时的默认账号（集成到 main.py 时会传参覆盖）
-PHONE = input("手机号：")
-PASSWORD = input("密码：")
+
 
 # 如果你知道自己的 uid，可以直接填；否则留 None，由后续逻辑识别
 FIXED_UID: Optional[int] = None
@@ -526,8 +525,14 @@ def do_login_with_phone(page: Page | Frame, phone: str, password: str):
 
     # 4. 等弹窗出来，点击「密码登录」
     # 注意：这一步经常出现在主文档的弹窗里，所以要重新在所有 scope 中找
-    _click_first(page, "密码登录", exact_text=True, timeout=20000)
-    logger.info("已点击「密码登录」")
+    # 有时文案/空格会有细微变化，先尝试精确文本，再退回到模糊 text 选择器
+    try:
+        _click_first(page, "密码登录", exact_text=True, timeout=20000)
+        logger.info("已点击「密码登录」（精确匹配）")
+    except Exception as e:
+        logger.warning(f"精确文本『密码登录』点击失败，改用模糊匹配：{e}")
+        _click_first(page, "text=密码登录", exact_text=False, timeout=20000)
+        logger.info("已点击「密码登录」（模糊匹配）")
     time.sleep(random.uniform(0.2, 0.5))
 
     # 5. 输入手机号
@@ -687,6 +692,8 @@ def main():
 
 
 if __name__ == "__main__":
+    PHONE = input("手机号：")
+    PASSWORD = input("密码：")
     main()
 
 
