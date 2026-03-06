@@ -111,21 +111,6 @@ def set_vip_further_get_time_ms(user_uid, ms: int) -> None:
         logger.error(f"保存用户 {user_uid} 的 VIP furtherVipGetTime 失败: {e}")
 
 
-def is_vip_due(user_uid, *, now_ms: int | None = None) -> bool:
-    """
-    判断当前是否需要为该用户打开 VIP_RIGHT_URL 领取/刷新：
-    - Redis 为空：需要执行（用于补偿初始化/异常漏跑）
-    - Redis 时间 <= 当前时间：需要执行（到期或已过期，需补执行）
-    - Redis 时间 > 当前时间：不需要执行（未到期，跳过检测）
-    """
-    if now_ms is None:
-        now_ms = int(time.time() * 1000)
-    next_ms = get_vip_further_get_time_ms(user_uid)
-    if not next_ms:
-        return True
-    return int(next_ms) <= int(now_ms)
-
-
 def _fmt_ms(ms: int) -> str:
     try:
         return datetime.fromtimestamp(int(ms) / 1000).strftime("%Y-%m-%d %H:%M:%S")
@@ -403,52 +388,100 @@ def interval_task_runner():
                 # 检查是否应该执行任务（距离上次执行>=设置的间隔天数）
                 user_uid = user.get('uid', user.get('phone'))
 
-                # 1) VIP 到期/过期补执行：打开权益页即可自动领取，并更新下一次可领取时间
-                #    未到期则完全跳过该检测（避免打扰“发布动态间隔检测”日志/流程）。
+                # 1) VIP 领取逻辑：
+                #    - 如果 Redis 中有 furtherVipGetTime：
+                #        * 今天 == 领取日：仅打开权益页自动领取并刷新时间，当天不发动态，也不做“距离上次执行不足X天”的检测
+                #        * 今天 > 领取日：说明之前异常未执行，本次先尝试补领，然后仍按正常逻辑检测/发动态
+                #        * 今天 < 领取日：未到日期，不额外处理
+                #    - 如果 Redis 中没有记录：不做额外处理，由正常发动态流程中的监听来写入首个时间
                 if LOGIN_METHOD == "playwright":
                     try:
-                        if is_vip_due(user_uid):
-                            logger.info(
-                                f"用户 {user_uid} 到达/超过下次 VIP 领取时间（或无记录），将打开权益页尝试自动领取并刷新时间..."
-                            )
+                        vip_ms = get_vip_further_get_time_ms(user_uid)
+                        if vip_ms:
+                            vip_date = datetime.fromtimestamp(int(vip_ms) / 1000).date()
+                            today = date.today()
 
-                            # 获取可用 client（用于拿 cookie 注入浏览器）
-                            client = None
-                            if user.get("uid") and str(user.get("uid")) != str(user.get("phone")):
-                                client = auth.get_client_by_uid(user.get("uid"))
-                            if not client:
-                                client = auth.login(user.get("phone"), user.get("password"), task_key=user.get("task_key"))
-                            if not client:
-                                logger.error(f"用户 {user_uid} 无法获取有效登录态，跳过本次 VIP 权益页打开")
-                            else:
-                                from playwright_handle.friend import open_vip_right_page_and_listen
-
-                                profile_dir = PLAYWRIGHT_PROFILE_BASEDIR
-                                if PLAYWRIGHT_PROFILE_PER_USER:
-                                    safe_phone = "".join([c for c in str(user.get("phone")) if c.isdigit()]) or str(user.get("phone"))
-                                    profile_dir = os.path.join(PLAYWRIGHT_PROFILE_BASEDIR, safe_phone)
-
-                                def _on_vip_time(ms: int):
-                                    set_vip_further_get_time_ms(user_uid, ms)
-                                    logger.info(f"用户 {user_uid} 已更新下次可领取 VIP 时间：{_fmt_ms(ms)}（ms={ms}）")
-
-                                ms = open_vip_right_page_and_listen(
-                                    profile_dir,
-                                    cookie_str=client.get_cookie_str(),
-                                    phone=user.get("phone"),
-                                    password=user.get("password"),
-                                    vip_further_get_time_callback=_on_vip_time,
+                            # 情况一：今天正好是领取日，只领 VIP，不发动态
+                            if today == vip_date:
+                                logger.info(
+                                    f"用户 {user_uid} 今天是 VIP 可领取日期 {vip_date}，"
+                                    f"将仅打开权益页自动领取并刷新时间，当天不再执行发布动态任务。"
                                 )
 
-                                if ms:
-                                    # 再次兜底写入（即使回调没触发）
-                                    set_vip_further_get_time_ms(user_uid, int(ms))
-                                    logger.info(f"用户 {user_uid} 本次权益页监听完成，下次可领取 VIP 时间：{_fmt_ms(ms)}（ms={ms}）")
+                                # 获取可用 client（用于拿 cookie 注入浏览器）
+                                client = None
+                                if user.get("uid") and str(user.get("uid")) != str(user.get("phone")):
+                                    client = auth.get_client_by_uid(user.get("uid"))
+                                if not client:
+                                    client = auth.login(user.get("phone"), user.get("password"), task_key=user.get("task_key"))
+                                if not client:
+                                    logger.error(f"用户 {user_uid} 无法获取有效登录态，跳过本次 VIP 权益页打开")
                                 else:
-                                    logger.warning(f"用户 {user_uid} 本次权益页未解析到 furtherVipGetTime（将下次继续补偿执行）")
+                                    from playwright_handle.friend import open_vip_right_page_and_listen
 
-                            # 当天以“领取 VIP”为主，不再进行发布动态的间隔检测/执行
-                            continue
+                                    profile_dir = PLAYWRIGHT_PROFILE_BASEDIR
+                                    if PLAYWRIGHT_PROFILE_PER_USER:
+                                        safe_phone = "".join([c for c in str(user.get("phone")) if c.isdigit()]) or str(user.get("phone"))
+                                        profile_dir = os.path.join(PLAYWRIGHT_PROFILE_BASEDIR, safe_phone)
+
+                                    def _on_vip_time(ms: int):
+                                        set_vip_further_get_time_ms(user_uid, ms)
+                                        logger.info(f"用户 {user_uid} 已更新下次可领取 VIP 时间：{_fmt_ms(ms)}（ms={ms}）")
+
+                                    ms = open_vip_right_page_and_listen(
+                                        profile_dir,
+                                        cookie_str=client.get_cookie_str(),
+                                        phone=user.get("phone"),
+                                        password=user.get("password"),
+                                        vip_further_get_time_callback=_on_vip_time,
+                                    )
+
+                                    if ms:
+                                        # 再次兜底写入（即使回调没触发）
+                                        set_vip_further_get_time_ms(user_uid, int(ms))
+                                        logger.info(f"用户 {user_uid} 本次权益页监听完成，下次可领取 VIP 时间：{_fmt_ms(ms)}（ms={ms}）")
+                                    else:
+                                        logger.warning(f"用户 {user_uid} 本次权益页未解析到 furtherVipGetTime（将下次继续补偿执行）")
+
+                                # 当天以“领取 VIP”为主，不再进行发布动态的间隔检测/执行
+                                continue
+
+                            # 情况二：已经错过领取日（例如 Redis 写的是 3.8，今天是 3.12），本次先补领，再继续正常发动态逻辑
+                            if today > vip_date:
+                                logger.info(
+                                    f"用户 {user_uid} 已错过 VIP 领取日期 {vip_date}，"
+                                    f"本次将先尝试补领 VIP，再按正常逻辑检查并执行发布动态任务。"
+                                )
+
+                                client = None
+                                if user.get("uid") and str(user.get("uid")) != str(user.get("phone")):
+                                    client = auth.get_client_by_uid(user.get("uid"))
+                                if not client:
+                                    client = auth.login(user.get("phone"), user.get("password"), task_key=user.get("task_key"))
+                                if client:
+                                    from playwright_handle.friend import open_vip_right_page_and_listen
+
+                                    profile_dir = PLAYWRIGHT_PROFILE_BASEDIR
+                                    if PLAYWRIGHT_PROFILE_PER_USER:
+                                        safe_phone = "".join([c for c in str(user.get("phone")) if c.isdigit()]) or str(user.get("phone"))
+                                        profile_dir = os.path.join(PLAYWRIGHT_PROFILE_BASEDIR, safe_phone)
+
+                                    def _on_vip_time2(ms: int):
+                                        set_vip_further_get_time_ms(user_uid, ms)
+                                        logger.info(f"用户 {user_uid} 补领后已更新下次可领取 VIP 时间：{_fmt_ms(ms)}（ms={ms}）")
+
+                                    ms2 = open_vip_right_page_and_listen(
+                                        profile_dir,
+                                        cookie_str=client.get_cookie_str(),
+                                        phone=user.get("phone"),
+                                        password=user.get("password"),
+                                        vip_further_get_time_callback=_on_vip_time2,
+                                    )
+                                    if ms2:
+                                        set_vip_further_get_time_ms(user_uid, int(ms2))
+                                        logger.info(f"用户 {user_uid} 补领完成，下次可领取 VIP 时间：{_fmt_ms(ms2)}（ms={ms2}）")
+                                else:
+                                    logger.error(f"用户 {user_uid} 无法获取有效登录态，跳过本次 VIP 补领")
                     except Exception as e:
                         logger.error(f"用户 {user_uid} 执行 VIP 权益页逻辑时发生异常: {e}")
 

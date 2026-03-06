@@ -205,6 +205,9 @@ wyy-musician/
 MIT License
 
 ## 更新日志
+- v1.3.5
+  - 优化VIP自动领取功能逻辑
+
 - v1.3.4
   - 添加VIP自动领取功能支持
 
