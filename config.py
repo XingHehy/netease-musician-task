@@ -111,3 +111,7 @@ except ValueError as e:
 
 EXECUTION_INTERVAL_DAYS = int(os.getenv('EXECUTION_INTERVAL_DAYS', '3'))  # 执行间隔天数
 
+# ========== 企业微信 Webhook 通知 ==========
+# 企业微信自定义机器人 Webhook 机器人的 key（不填则不发送）
+WECOM_WEBHOOK_KEY = os.getenv('WECOM_WEBHOOK_KEY', '').strip()
+
