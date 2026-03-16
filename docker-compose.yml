@@ -18,6 +18,8 @@ services:
       - MAX_MONTHLY_SENDS=4
       # 登录方式
       - LOGIN_METHOD=playwright
+      # 企业微信webhook密钥
+      - WECOM_WEBHOOK_KEY=your-wecom-webhook-key
     logging:
       driver: "json-file"
       options:

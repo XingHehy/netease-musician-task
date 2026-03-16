@@ -1,6 +1,19 @@
 # 网易音乐人分享任务工具
 
-网易音乐人分享任务自动分享工具，支持多用户、定时执行、自动登录和日志管理功能。
+网易音乐人分享任务自动分享工具，支持多用户、定时执行、自动登录、日志管理和通知提醒等功能。
+
+👉 **想快速了解能做什么？请查看功能预览：[`PREVIEW.md`](./docs/PREVIEW.md)**
+
+## 最近更新 / 新功能概览
+
+- **企业微信 Webhook 通知**：任务执行结果可推送到企业微信，实现异常告警与结果提醒
+- **VIP 自动领取**：支持自动领取音乐人永久 VIP（自动完成任务后）
+- **登录与分享增强**：
+  - Playwright 网页端登录与分享，减少风控与安全验证异常
+  - 支持复用网页 Cookie，降低 `301 用户未登陆`、分享异常概率
+- **任务可靠性提升**：
+  - 任务失败自动重试（最多多次尝试）以提高成功率
+  - 统一配置文件集中管理配置项，执行逻辑更加清晰可控
 
 ## 功能特性
 
@@ -15,6 +28,10 @@
 - ✅ **环境变量配置**：支持通过环境变量灵活配置执行参数
 - ✅ **日志管理**：详细的日志记录，支持日志轮转和大小限制
 - ✅ **Docker 部署**：提供 Docker 镜像和 Compose 配置，便于部署
+- ✅ **VIP 自动领取**：自动完成 VIP 相关权益的领取操作
+- ✅ **企业微信通知**：通过企业微信 Webhook 推送任务执行结果和异常告警
+- ✅ **任务失败重试机制**：任务失败时自动按策略重试，提高成功率
+- ✅ **Playwright 支持**：提供基于 Playwright 的登录与分享方式，降低风控风险
 
 ## 技术栈
 
@@ -38,7 +55,7 @@
 
 ```bash
 git clone <repository-url>
-cd wyy-musician
+cd netease-musician-task
 ```
 
 ### 2. 安装依赖
@@ -160,7 +177,15 @@ docker-compose up -d
 如果不使用 Docker Compose，也可以直接使用 `docker run` 命令启动容器：
 
 ```bash
-docker run -d --name netease-musician-task -e TZ=Asia/Shanghai -e REDIS_URL="redis://localhost:6379/0" -e SEND_TIME="09:30" -e EXECUTION_INTERVAL_DAYS="7" -e MAX_MONTHLY_SENDS="4" -e LOGIN_METHOD="playwright" --restart always netease-musician-task:latest
+docker run -d --name netease-musician-task \
+  -e TZ=Asia/Shanghai \
+  -e REDIS_URL="redis://localhost:6379/0" \
+  -e SEND_TIME="09:30" \
+  -e EXECUTION_INTERVAL_DAYS="3" \
+  -e MAX_MONTHLY_SENDS="5" \
+  -e LOGIN_METHOD="playwright" \
+  -e WECOM_WEBHOOK_KEY="your-wecom-webhook-key" \
+  --restart always netease-musician-task:latest
 ```
 
 
@@ -178,7 +203,7 @@ docker run -d --name netease-musician-task -e TZ=Asia/Shanghai -e REDIS_URL="red
 ## 项目结构
 
 ```
-wyy-musician/
+netease-musician-task/
 ├── core.py              # 核心功能模块
 ├── main.py              # 定时任务入口
 ├── Dockerfile           # Docker镜像构建文件
