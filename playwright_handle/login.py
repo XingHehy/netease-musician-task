@@ -9,10 +9,17 @@ from __future__ import annotations
 
 import os
 import random
+import re
+import sys
 import time
 import logging
 import urllib.parse
 from typing import Optional
+
+# 项目根目录；单独执行 python playwright_handle/login.py 时须先把根目录加入 path，否则找不到 core
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 from ddddocr import DdddOcr
 from playwright.sync_api import sync_playwright, Page, Frame
@@ -20,6 +27,10 @@ from playwright.sync_api import sync_playwright, Page, Frame
 from core import NeteaseClient  # 仅用于本模块内部根据 Cookie 识别 uid
 
 logger = logging.getLogger("netease_music")
+
+
+class NeteaseLoginNetworkRiskError(RuntimeError):
+    """页面提示网络环境安全风险时抛出，避免被滑块流程的 broad except 吞掉。"""
 
 
 # ======== 按需修改这里（作为脚本单独运行时使用） ========
@@ -31,11 +42,40 @@ LOGIN_URL = "https://music.163.com/#/login?targetUrl=https%3A%2F%2Fmusic.163.com
 # 如果你知道自己的 uid，可以直接填；否则留 None，由后续逻辑识别
 FIXED_UID: Optional[int] = None
 
-# Playwright 持久化用户目录（可复用登录态）
-PROFILE_DIR = ".playwright_profile_netease"
+# Playwright 持久化用户目录（可复用登录态，默认在项目根目录）
+PROFILE_DIR = os.path.join(_PROJECT_ROOT, ".playwright_profiles")
 
 
 # ======== 工具函数 ========
+
+
+def _phone_debug_subdir(phone: str) -> str:
+    """用于 debug 目录名，避免路径非法字符。"""
+    s = re.sub(r"[^\d+]+", "_", (phone or "").strip())
+    return s.strip("_") or "unknown"
+
+
+def save_login_debug_screenshot(page: Page | Frame, phone: str, tag: str) -> Optional[str]:
+    """
+    登录失败或异常场景截图，保存到 **项目根目录** 下 debug/{phone}/（不写入 playwright_handle）。
+    tag 仅用于文件名（会净化非法字符）。
+    """
+    if not phone:
+        return None
+    try:
+        pw_page: Page = page if isinstance(page, Page) else page.page
+        sub = _phone_debug_subdir(phone)
+        out_dir = os.path.join(_PROJECT_ROOT, "debug", sub)
+        os.makedirs(out_dir, exist_ok=True)
+        safe_tag = re.sub(r"[^\w\-.]+", "_", tag).strip("_")[:80] or "shot"
+        name = f"{time.strftime('%Y%m%d_%H%M%S')}_{safe_tag}.png"
+        path = os.path.join(out_dir, name)
+        pw_page.screenshot(path=path, full_page=True)
+        logger.info(f"[登录调试] 已保存截图：{path}")
+        return path
+    except Exception as e:
+        logger.warning(f"[登录调试] 截图失败：{e}")
+        return None
 
 
 def cookies_to_cookie_str(cookies: list[dict]) -> str:
@@ -153,6 +193,48 @@ def _try_click_if_visible(page: Page | Frame, text: str, *, exact_text: bool = T
     return False
 
 
+NETWORK_SECURITY_RISK_TEXT = "您当前的网络环境存在安全风险"
+
+
+def _is_network_security_risk_visible(page: Page | Frame) -> bool:
+    """
+    登录后若出现「您当前的网络环境存在安全风险」，易与「未出现滑块」混淆。
+    在所有 frame 中检测该文案是否可见。
+    """
+    try:
+        for scope in _scopes(page):
+            loc = scope.get_by_text(NETWORK_SECURITY_RISK_TEXT, exact=True)
+            if loc.count() == 0:
+                continue
+            try:
+                if loc.first.is_visible():
+                    return True
+            except Exception:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def ensure_no_network_security_risk(
+    page: Page | Frame, *, where: str = "", debug_phone: Optional[str] = None
+) -> None:
+    """
+    若检测到网络环境安全风险提示，记录日志并终止自动登录（换 IP/代理通常才能恢复）。
+    """
+    if not _is_network_security_risk_visible(page):
+        return
+    suffix = f"（{where}）" if where else ""
+    logger.error(
+        f"[登录风控]{suffix} 页面提示「{NETWORK_SECURITY_RISK_TEXT}」，"
+        "自动流程无法继续，请更换网络、关闭代理或使用更干净的环境后重试。"
+    )
+    if debug_phone:
+        wt = re.sub(r"[^\w\-.]+", "_", where)[:40] if where else ""
+        save_login_debug_screenshot(page, debug_phone, f"network_risk_{wt}" if wt else "network_risk")
+    raise NeteaseLoginNetworkRiskError(NETWORK_SECURITY_RISK_TEXT)
+
+
 def _has_yidun_slider_modal(page: Page | Frame) -> bool:
     """
     快速判断是否出现 yidun 滑块弹窗/容器（不等待，只做存在性检测）。
@@ -207,7 +289,7 @@ def _check_first(page: Page | Frame, selector: str, *, timeout: int = 15000):
     raise last_err or RuntimeError(f"无法勾选：{selector}")
 
 
-def solve_slider_captcha(page: Page | Frame, max_retry: int = 3):
+def solve_slider_captcha(page: Page | Frame, max_retry: int = 3, *, debug_phone: Optional[str] = None):
     """
     网易云 yidun 滑块高成功率版本（修复 OpenCV 尺寸断言错误）
     - 真滑块判断（naturalWidth）
@@ -258,9 +340,10 @@ def solve_slider_captcha(page: Page | Frame, max_retry: int = 3):
     def is_sms_mode(scope):
         return scope.locator(".yidun_smsbox, .yidun_voice").count() > 0
 
-    # 等验证码弹窗
+    # 等验证码弹窗（同时排除：仅有风控文案、无滑块）
     modal_found = False
     for _ in range(30):
+        ensure_no_network_security_risk(page, where="等待滑块验证码期间", debug_phone=debug_phone)
         for scope in _scopes(page):
             if scope.locator(".yidun_modal__body, .yidun.yidun-custom").count() > 0:
                 modal_found = True
@@ -270,7 +353,10 @@ def solve_slider_captcha(page: Page | Frame, max_retry: int = 3):
         time.sleep(0.3)
 
     if not modal_found:
+        ensure_no_network_security_risk(page, where="确认无滑块弹窗前", debug_phone=debug_phone)
         logger.info("未触发验证码，跳过滑块验证")
+        if debug_phone:
+            save_login_debug_screenshot(page, debug_phone, "no_captcha")
         return
 
     # 优先使用 ddddocr 的 slide_match（修正参数顺序 + 尺寸校验，避免其内部 OpenCV 断言）
@@ -387,6 +473,8 @@ def solve_slider_captcha(page: Page | Frame, max_retry: int = 3):
                 continue
 
     logger.error(f"[滑块] 累计 {max_retry} 次尝试均失败，放弃滑块验证（请手动完成或检查网络/验证码样式）")
+    if debug_phone:
+        save_login_debug_screenshot(page, debug_phone, "slider_failed")
 
 
 def check_secondary_verification(page: Page | Frame, timeout: int = 10, *, auto_action: bool = True) -> bool:
@@ -559,11 +647,12 @@ def browser_login(phone: str, password: str, profile_dir: str = PROFILE_DIR) -> 
     if not phone or not password:
         raise ValueError("phone/password 不能为空")
 
-    os.makedirs("log", exist_ok=True)
-
+    os.makedirs(os.path.join(_PROJECT_ROOT, "log"), exist_ok=True)
+    profile_dir = os.path.join(profile_dir, phone)
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
             user_data_dir=profile_dir,
+            # headless=False,
             headless=True,
             viewport={"width": 1280, "height": 800},
         )
@@ -573,12 +662,21 @@ def browser_login(phone: str, password: str, profile_dir: str = PROFILE_DIR) -> 
         page.goto(LOGIN_URL, wait_until="domcontentloaded")
 
         logger.info("开始执行自动登录流程（main frame + 所有 iframe 自动探测）...")
-        do_login_with_phone(page, phone, password)
+        try:
+            do_login_with_phone(page, phone, password)
+        except Exception:
+            save_login_debug_screenshot(page, phone, "login_flow_error")
+            context.close()
+            raise
 
         try:
-            solve_slider_captcha(page)
+            solve_slider_captcha(page, debug_phone=phone)
+        except NeteaseLoginNetworkRiskError:
+            context.close()
+            raise
         except Exception as e:
             logger.warning(f"滑块验证码处理过程出错：{e}")
+            save_login_debug_screenshot(page, phone, "slider_exception")
 
         # 少数情况下：滑块成功后会回到「密码登录」选项卡，需要重新点并再次触发滑块
         # 这里避免无条件重复 solve_slider_captcha()，否则会出现多次“未触发验证码”的日志与耗时
@@ -599,9 +697,19 @@ def browser_login(phone: str, password: str, profile_dir: str = PROFILE_DIR) -> 
             # 只有检测到滑块容器时才处理滑块
             if _has_yidun_slider_modal(page):
                 try:
-                    solve_slider_captcha(page)
+                    solve_slider_captcha(page, debug_phone=phone)
+                except NeteaseLoginNetworkRiskError:
+                    context.close()
+                    raise
                 except Exception as e:
                     logger.warning(f"滑块验证码处理过程出错：{e}")
+                    save_login_debug_screenshot(page, phone, "slider_exception")
+
+        try:
+            ensure_no_network_security_risk(page, where="登录重试结束后", debug_phone=phone)
+        except NeteaseLoginNetworkRiskError:
+            context.close()
+            raise
 
         # 滑块验证完成后，检查是否需要二次验证
         try:
@@ -634,11 +742,14 @@ def browser_login(phone: str, password: str, profile_dir: str = PROFILE_DIR) -> 
                     time.sleep(2)
                 else:
                     logger.warning("[登录] 二次验证等待超时，继续尝试获取 Cookie")
+                    save_login_debug_screenshot(page, phone, "secondary_verify_timeout")
         except Exception as e:
             logger.warning(f"检查二次验证时出错：{e}")
+            save_login_debug_screenshot(page, phone, "secondary_verify_error")
 
         deadline = time.time() + 60
         cookie_str = ""
+        login_cookie_ok = False
         while time.time() < deadline:
             cookies = context.cookies("https://music.163.com")
             cookie_str = cookies_to_cookie_str(cookies)
@@ -646,12 +757,16 @@ def browser_login(phone: str, password: str, profile_dir: str = PROFILE_DIR) -> 
             has_music_u = any(c.get("name") == "MUSIC_U" and c.get("value") for c in cookies)
             has_csrf = any(c.get("name") == "__csrf" and c.get("value") for c in cookies)
             if has_music_u or has_csrf:
+                login_cookie_ok = True
                 break
             time.sleep(1)
 
+        if not login_cookie_ok:
+            save_login_debug_screenshot(page, phone, "no_login_cookie")
+
         context.close()
 
-        if not cookie_str:
+        if not cookie_str or not login_cookie_ok:
             raise RuntimeError("浏览器登录未获取到任何 Cookie，请检查是否登录成功。")
 
         return cookie_str

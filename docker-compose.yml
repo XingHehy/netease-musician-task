@@ -6,6 +6,7 @@ services:
     volumes:
       - ./log:/app/log
       - ./playwright_profiles:/app/playwright_profiles
+      - ./debug:/app/debug
     environment:
       - TZ=Asia/Shanghai
       # Redis连接URL，格式：redis://[password@]host:port/db
