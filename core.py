@@ -459,8 +459,8 @@ class AuthManager:
             
         try:
             # Key 改回简单的 :cookie，存纯字符串
-            self.redis.set(f'netease:music:user:{uid}:cookie', cookie_str, ex=86400 * 7)  # 7天过期
-            self.redis.set(f'netease:music:user:{uid}:userdata', json.dumps(user_data), ex=86400 * 7)
+            self.redis.set(f'netease:music:user:{uid}:cookie', cookie_str, ex=86400 * 30)  # 30天过期
+            self.redis.set(f'netease:music:user:{uid}:userdata', json.dumps(user_data), ex=86400 * 30)
             return True
         except Exception as e:
             logger.error(f"保存用户 {uid} 会话失败: {e}")

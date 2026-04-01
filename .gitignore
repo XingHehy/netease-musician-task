@@ -5,3 +5,4 @@ __pycache__/
 .playwright_profiles/
 */.playwright_profile_netease
 debug/
+test/

@@ -638,7 +638,7 @@ def do_login_with_phone(page: Page | Frame, phone: str, password: str):
     logger.info("已点击「登录」")
 
 
-def browser_login(phone: str, password: str, profile_dir: str = PROFILE_DIR) -> str:
+def browser_login(phone: str, password: str, profile_dir: str = PROFILE_DIR, headless: bool = True) -> str:
     """
     供核心逻辑调用的通用浏览器登录函数：
     - 使用 Playwright 完成手机号+密码登录（含滑块）
@@ -652,8 +652,7 @@ def browser_login(phone: str, password: str, profile_dir: str = PROFILE_DIR) -> 
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
             user_data_dir=profile_dir,
-            # headless=False,
-            headless=True,
+            headless=headless,
             viewport={"width": 1280, "height": 800},
         )
         page = context.new_page()
@@ -781,7 +780,7 @@ def main():
     """
     from core import AuthManager, NeteaseClient  # 延迟导入避免循环
 
-    cookie_str = browser_login(PHONE, PASSWORD, PROFILE_DIR)
+    cookie_str = browser_login(PHONE, PASSWORD, PROFILE_DIR,headless)
 
     uid = FIXED_UID or try_get_uid_from_cookie(cookie_str)
     if not uid:
@@ -801,14 +800,21 @@ def main():
         ok = auth._save_session(uid, cookie_str, user_data)
         if not ok:
             raise SystemExit("写入 Redis 失败：请检查 REDIS_URL 配置与 Redis 连接。")
-        logger.info(f"已写入 Redis：netease:music:user:{uid}:cookie （有效期 7 天）")
+        logger.info(f"已写入 Redis：netease:music:user:{uid}:cookie")
 
     logger.info("完成。你现在可以运行 main.py/core.py 的任务逻辑，会优先使用这份 cookie。")
 
 
 if __name__ == "__main__":
-    PHONE = input("手机号：")
-    PASSWORD = input("密码：")
+    if len(sys.argv) >= 3:
+        PHONE = sys.argv[1]
+        PASSWORD = sys.argv[2]
+        headless = sys.argv[3] == "True"
+    else:
+        PHONE = input("手机号：")
+        PASSWORD = input("密码：")
+
+    # 执行主函数
     main()
 
 
