@@ -813,6 +813,7 @@ if __name__ == "__main__":
     else:
         PHONE = input("手机号：")
         PASSWORD = input("密码：")
+        headless = input("headless yes?：") == "yes"
 
     # 执行主函数
     main()

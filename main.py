@@ -540,7 +540,7 @@ def interval_task_runner():
                                 if not client:
                                     logger.error(f"用户 {user_uid} 无法获取有效登录态，跳过本次 VIP 权益页打开")
                                 else:
-                                    from playwright_handle.friend import open_vip_right_page_and_listen
+                                    from playwright_handle.musician import open_vip_right_page_and_listen
 
                                     profile_dir = PLAYWRIGHT_PROFILE_BASEDIR
                                     if PLAYWRIGHT_PROFILE_PER_USER:
@@ -582,7 +582,7 @@ def interval_task_runner():
                                 if not client:
                                     client = auth.login(user.get("phone"), user.get("password"), task_key=user.get("task_key"))
                                 if client:
-                                    from playwright_handle.friend import open_vip_right_page_and_listen
+                                    from playwright_handle.musician import open_vip_right_page_and_listen
 
                                     profile_dir = PLAYWRIGHT_PROFILE_BASEDIR
                                     if PLAYWRIGHT_PROFILE_PER_USER:
