@@ -258,13 +258,16 @@ def share_note_and_delete(
     phone: str | None = None,
     password: str | None = None,
     vip_further_get_time_callback=None,
-) -> bool:
+) -> tuple[bool, str | None]:
     """
     供 main.py 调用：用浏览器发布笔记（配音乐）并监听分享接口返回，拿到 event_id 后等待删除。
+
+    返回：
+    - (成功标志, 最新Cookie字符串)
     """
     os.makedirs("log", exist_ok=True)
 
-    def _run_once(_cookie_str: str | None) -> bool:
+    def _run_once(_cookie_str: str | None) -> tuple[bool, str | None]:
         with sync_playwright() as p:
             context = p.chromium.launch_persistent_context(
                 user_data_dir=profile_dir,
@@ -291,7 +294,7 @@ def share_note_and_delete(
             if scope.locator("#pubEvent").count() == 0:
                 logger.warning("未找到发笔记按钮，疑似未登录态")
                 context.close()
-                return False
+                return False, None
 
             # 2. 点击「发笔记」按钮
             scope.click("#pubEvent")
@@ -347,7 +350,7 @@ def share_note_and_delete(
             if not event_id:
                 logger.warning("分享接口返回中未获取到 event.id，发布可能失败/触发验证")
                 context.close()
-                return False
+                return False, None
 
             # 8. 发布成功后，进入音乐人权益页，监听并打印 VIP 任务进度
             try:
@@ -359,18 +362,19 @@ def share_note_and_delete(
             logger.info(f"分享成功，event_id={event_id}，等待 10 秒后删除动态...")
             time.sleep(10)
             cookies = context.cookies("https://music.163.com")
-            cookie_str2 = _cookies_to_cookie_str(cookies)
-            client = NeteaseClient(cookie_str=cookie_str2)
+            fresh_cookie_str = _cookies_to_cookie_str(cookies)
+            client = NeteaseClient(cookie_str=fresh_cookie_str)
             task = TaskManager(client)
             delete_res = task.delete_dynamic(event_id)
             logger.info(f"删除动态结果: {delete_res}")
 
             context.close()
-            return True
+            return True, fresh_cookie_str
 
     # 第一次尝试：用传入 cookie 注入
-    if _run_once(cookie_str):
-        return True
+    success, fresh_cookie = _run_once(cookie_str)
+    if success:
+        return True, fresh_cookie
 
     # 若仍未登录且给了账号密码，则执行登录刷新 profile，再重试一次（不再依赖旧 cookie）
     if phone and password:
@@ -381,17 +385,19 @@ def share_note_and_delete(
             new_cookie_str = browser_login(phone, password, profile_dir=profile_dir)
         except Exception as e:
             logger.error(f"Playwright 登录失败，无法继续发布：{e}")
-            return False
+            return False, None
         return _run_once(new_cookie_str)
 
-    return False
+    return False, None
 
 
 def main():
     msg = f"{time.strftime('%Y年%m月%d日%H:%M:%S')}早上好"
-    ok = share_note_and_delete(PROFILE_DIR, msg, search_keyword="你好")
+    ok, fresh_cookie = share_note_and_delete(PROFILE_DIR, msg, search_keyword="你好")
     if not ok:
         raise SystemExit("发布失败：请确认当前 profile 已登录，或页面触发了额外验证。")
+    if fresh_cookie:
+        logger.info(f"获取到最新Cookie: {fresh_cookie[:50]}...")
 
 
 if __name__ == "__main__":

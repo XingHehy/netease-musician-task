@@ -408,6 +408,16 @@ def daily_task_runner():
                     daily_task_res = task.daily_task()
                     logger.info(f"日常签到任务结果：{json.dumps(daily_task_res, ensure_ascii=False)[:100]}")
 
+                    # 任务执行完成后，更新Cookie到Redis
+                    if client:
+                        try:
+                            fresh_cookie = client.get_cookie_str()
+                            if fresh_cookie:
+                                auth.update_cookie(user['uid'], fresh_cookie)
+                                logger.info(f"用户 {user['uid']} 每日任务完成，已更新Cookie到Redis")
+                        except Exception as e:
+                            logger.warning(f"更新用户 {user['uid']} Cookie失败: {e}")
+
                     # 汇总给企业微信的精简结果
                     musician_summary = musician_checkin_res or {"message": "未获取到音乐人中心签到结果"}
                     daily_summary = daily_task_res or {"message": "未获取到日常签到任务结果"}
@@ -686,9 +696,10 @@ def interval_task_runner():
                     
                     # 发布动态任务（带重试）
                     share_res = None
+                    fresh_cookie_from_browser = None
                     def execute_share_song():
                         nonlocal client, task
-                        nonlocal share_res
+                        nonlocal share_res, fresh_cookie_from_browser
                         if LOGIN_METHOD == 'playwright':
                             # 用浏览器发布（避免 code=250 安全验证分享异常）
                             from playwright_handle.friend import share_note_and_delete
@@ -700,7 +711,7 @@ def interval_task_runner():
 
                             msg = f"{datetime.now().strftime('%Y年%m月%d日%H:%M:%S')}早上好"
                             # 将当前可用的 cookie 注入到浏览器；若仍未登录则用账号密码再走一次登录流程
-                            ok = share_note_and_delete(
+                            ok, fresh_cookie_from_browser = share_note_and_delete(
                                 profile_dir,
                                 msg,
                                 search_keyword="你好",
@@ -734,7 +745,23 @@ def interval_task_runner():
                         delay=3,
                         task_name=f"用户 {user['uid']} 的发布动态任务"
                     )
-                    
+
+                    # 任务执行完成后，更新Cookie到Redis
+                    # playwright模式：使用浏览器返回的最新Cookie
+                    # api模式：使用client当前的Cookie
+                    if client:
+                        try:
+                            if LOGIN_METHOD == 'playwright' and fresh_cookie_from_browser:
+                                auth.update_cookie(user['uid'], fresh_cookie_from_browser)
+                                logger.info(f"用户 {user['uid']} 发布动态任务完成，已从浏览器更新Cookie到Redis")
+                            else:
+                                fresh_cookie = client.get_cookie_str()
+                                if fresh_cookie:
+                                    auth.update_cookie(user['uid'], fresh_cookie)
+                                    logger.info(f"用户 {user['uid']} 发布动态任务完成，已更新Cookie到Redis")
+                        except Exception as e:
+                            logger.warning(f"更新用户 {user['uid']} Cookie失败: {e}")
+
                     if success and share_res and share_res.get('code') == 200:
                         # 更新最后发送记录
                         update_last_send_record(user_uid)

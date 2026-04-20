@@ -456,7 +456,7 @@ class AuthManager:
     def _save_session(self, uid, cookie_str, user_data):
         if not self.redis or not cookie_str:
             return False
-            
+
         try:
             # Key 改回简单的 :cookie，存纯字符串
             self.redis.set(f'netease:music:user:{uid}:cookie', cookie_str, ex=86400 * 30)  # 30天过期
@@ -464,6 +464,18 @@ class AuthManager:
             return True
         except Exception as e:
             logger.error(f"保存用户 {uid} 会话失败: {e}")
+            return False
+
+    def update_cookie(self, uid, cookie_str):
+        """更新用户Cookie到Redis（用于任务执行后刷新Cookie）"""
+        if not self.redis or not cookie_str:
+            return False
+        try:
+            self.redis.set(f'netease:music:user:{uid}:cookie', cookie_str, ex=86400 * 30)
+            logger.info(f"已更新用户 {uid} 的Cookie到Redis")
+            return True
+        except Exception as e:
+            logger.error(f"更新用户 {uid} Cookie失败: {e}")
             return False
 
 
