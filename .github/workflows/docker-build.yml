@@ -38,9 +38,8 @@ jobs:
           context: .
           push: true
           tags: |
-            # 阿里云 ACR
             registry.cn-hangzhou.aliyuncs.com/xinghehy/netease-musician-task:${{ steps.vars.outputs.tag }}
             registry.cn-hangzhou.aliyuncs.com/xinghehy/netease-musician-task:latest
-            # Docker Hub 官方
+            
             xinghehy/netease-musician-task:${{ steps.vars.outputs.tag }}
             xinghehy/netease-musician-task:latest
