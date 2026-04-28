@@ -10,6 +10,7 @@
 - **VIP 自动领取**：支持自动领取音乐人永久 VIP（自动完成任务后）
 - **登录与分享增强**：
   - Playwright 网页端登录与分享，减少风控与安全验证异常
+  - **自动更新cookie**：每次运行，会自动更新 Cookie
   - 支持复用网页 Cookie，降低 `301 用户未登陆`、分享异常概率
   - 登录流程支持易盾滑块（`ddddocr`）、网络风控文案识别；失败时可在项目根目录 `debug/{手机号}/` 查看截图
 - **任务可靠性提升**：
@@ -69,6 +70,7 @@ pip install -r requirements.txt
 ```
 
 ### 3.（推荐）安装 Playwright 浏览器
+`API版基本上已无法使用 `
 
 仅在需要网页登录 / `LOGIN_METHOD=playwright` 时需要：
 
@@ -116,7 +118,7 @@ export REDIS_URL="redis://localhost:6379/5"
 export SEND_TIME="09:30"
 export EXECUTION_INTERVAL_DAYS="7"
 export MAX_MONTHLY_SENDS="4"
-export LOGIN_METHOD="playwright"
+export LOGIN_METHOD="playwright"  # 推荐：API版基本上已无法使用 
 export WECOM_WEBHOOK_KEY="your-wecom-webhook-key"
 ```
 
@@ -197,6 +199,7 @@ docker-compose up -d
 默认 `docker-compose.yml` 将宿主机的 `./log`、`./playwright_profiles` 挂载到容器内。镜像工作目录为 `/app`，若使用默认 `PLAYWRIGHT_PROFILE_BASEDIR=.playwright_profiles`，数据在容器内**未**挂载到上述卷。为持久化浏览器登录态，建议在 Compose 中增加环境变量，使目录与卷一致，例如：
 
 ```yaml
+# 推荐：API版基本上已无法使用 
 environment:
   - PLAYWRIGHT_PROFILE_BASEDIR=playwright_profiles
 ```
@@ -219,7 +222,7 @@ docker run -d --name netease-musician-task \
   -e SEND_TIME="09:30" \
   -e EXECUTION_INTERVAL_DAYS="7" \
   -e MAX_MONTHLY_SENDS="5" \
-  -e LOGIN_METHOD="playwright" \
+  -e LOGIN_METHOD="playwright" \    # 推荐：API版基本上已无法使用 
   -e PLAYWRIGHT_PROFILE_BASEDIR="playwright_profiles" \
   -e WECOM_WEBHOOK_KEY="your-wecom-webhook-key" \
   -v "$(pwd)/log:/app/log" \
@@ -349,3 +352,7 @@ MIT License
   - 支持多用户自动分享和删除动态  
   - 支持定时任务和 Docker 部署  
   - 实现日志管理和大小限制  
+
+## 友情链接
+ - [LINUX DO 社区](https://linux.do)
+
