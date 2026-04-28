@@ -4,6 +4,29 @@
 
 👉 **想快速了解能做什么？请查看功能预览：[`docs/PREVIEW.md`](./docs/PREVIEW.md)**
 
+## 快速开始
+
+使用 Docker 快速部署（推荐）：
+
+```bash
+# 1. 拉取镜像
+docker pull xinghehy/netease-musician-task:latest
+
+# 2. 运行容器（需先配置 Redis 和环境变量）
+docker run -d --name netease-musician-task \
+  -e REDIS_URL="redis://your-redis-host:6379/0" \
+  -e LOGIN_METHOD="playwright" \
+  -v "$(pwd)/log:/app/log" \
+  -v "$(pwd)/playwright_profiles:/app/playwright_profiles" \
+  --restart always \
+  xinghehy/netease-musician-task:latest
+
+# 3. 在 Redis 中添加任务（示例）
+# HSET netease:music:task task1 '{"phone": "13800138000", "password": "your_password"}'
+```
+
+详细配置说明见下文。
+
 ## 最近更新 / 新功能概览
 
 - **企业微信 Webhook 通知**：任务执行结果可推送到企业微信，实现异常告警与结果提醒
@@ -184,7 +207,17 @@ python main.py
 
 ## Docker 部署
 
+### 使用预构建镜像（推荐）
+
+可以直接使用已发布的 Docker 镜像，无需本地构建：
+
+```bash
+docker pull xinghehy/netease-musician-task:latest
+```
+
 ### 构建镜像
+
+如需自行构建：
 
 ```bash
 docker build -t netease-musician-task:latest .
@@ -192,8 +225,19 @@ docker build -t netease-musician-task:latest .
 
 ### Docker Compose
 
+使用预构建镜像：
+
 ```bash
 docker-compose up -d
+```
+
+或在 `docker-compose.yml` 中指定镜像：
+
+```yaml
+services:
+  netease-musician-task:
+    image: xinghehy/netease-musician-task:latest
+    # ... 其他配置
 ```
 
 默认 `docker-compose.yml` 将宿主机的 `./log`、`./playwright_profiles` 挂载到容器内。镜像工作目录为 `/app`，若使用默认 `PLAYWRIGHT_PROFILE_BASEDIR=.playwright_profiles`，数据在容器内**未**挂载到上述卷。为持久化浏览器登录态，建议在 Compose 中增加环境变量，使目录与卷一致，例如：
@@ -215,6 +259,8 @@ volumes:
 
 ### docker run 示例
 
+使用预构建镜像：
+
 ```bash
 docker run -d --name netease-musician-task \
   -e TZ=Asia/Shanghai \
@@ -229,7 +275,7 @@ docker run -d --name netease-musician-task \
   -v "$(pwd)/playwright_profiles:/app/playwright_profiles" \
   -v "$(pwd)/debug:/app/debug" \
   --restart always \
-  netease-musician-task:latest
+  xinghehy/netease-musician-task:latest
 ```
 
 ---
@@ -355,4 +401,5 @@ MIT License
 
 ## 友情链接
  - [LINUX DO 社区](https://linux.do)
+ - [Docker Hub 镜像仓库](https://hub.docker.com/r/xinghehy/netease-musician-task)
 

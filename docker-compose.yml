@@ -1,6 +1,10 @@
 services:
   netease-musician-task:
-    image: netease-musician-task:latest
+    # 使用预构建镜像（推荐）
+    image: xinghehy/netease-musician-task:latest
+    # 或使用本地构建：
+    # build: .
+    # image: netease-musician-task:latest
     container_name: netease-musician-task
     restart: always
     volumes:
