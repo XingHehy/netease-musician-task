@@ -1,0 +1,10 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+APScheduler==3.11.0
+playwright==1.57.0
+ddddocr==1.5.6
+opencv-python-headless==4.10.0.84
+pillow==11.0.0
+Requests==2.32.5
+python-dotenv==1.1.1
+psutil==6.1.1

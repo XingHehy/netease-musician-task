@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>网易音乐人任务管理</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">♪</span>
+      <h1>音乐人任务管理</h1>
+    </div>
+    <div class="conn"><span id="ws-dot" class="dot"></span><span id="ws-text">连接中...</span></div>
+  </header>
+
+  <main class="container">
+    <div class="toolbar">
+      <h2>账号列表</h2>
+      <div class="toolbar-actions">
+        <button class="btn" id="btn-settings">全局设置</button>
+        <button class="btn btn-primary" id="btn-add">新增账号</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>手机号</th><th>昵称</th><th>Cookie 状态</th><th>运行时间</th><th>本月发布</th><th class="ta-r">操作</th>
+          </tr>
+        </thead>
+        <tbody id="acc-body"></tbody>
+      </table>
+      <div id="empty-hint" class="empty hidden">还没有账号，点右上角「新增账号」开始。</div>
+    </div>
+  </main>
+
+  <!-- 新增账号弹窗 -->
+  <div id="modal-add" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head"><h3>新增账号</h3><button class="x" data-close>&times;</button></div>
+      <label>手机号 <input id="in-phone" type="text" placeholder="手机号" /></label>
+      <label>密码 <input id="in-password" type="password" placeholder="密码" /></label>
+      <label>运行时间 <input id="in-runtime" type="time" /></label>
+      <div class="modal-actions">
+        <button class="btn" data-close>取消</button>
+        <button class="btn btn-primary" id="btn-save-add">保存并登录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 编辑账号弹窗 -->
+  <div id="modal-edit" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head"><h3>编辑账号</h3><button class="x" data-close>&times;</button></div>
+      <input id="edit-id" type="hidden" />
+      <label>密码 <input id="edit-password" type="password" placeholder="留空则不改" /></label>
+      <label>运行时间 <input id="edit-runtime" type="time" /></label>
+      <label>间隔天数 <input id="edit-interval" type="number" placeholder="留空用全局" /></label>
+      <label class="row"><input id="edit-enabled" type="checkbox" /> 启用</label>
+      <div class="modal-actions">
+        <button class="btn" data-close>取消</button>
+        <button class="btn btn-primary" id="btn-save-edit">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 全局设置弹窗 -->
+  <div id="modal-settings" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head"><h3>全局设置</h3><button class="x" data-close>&times;</button></div>
+      <label>默认运行时间 <input id="set-send-time" type="time" /></label>
+      <label>执行间隔天数 <input id="set-interval" type="number" /></label>
+      <label>每月最大发布 <input id="set-max-sends" type="number" /></label>
+      <label class="row"><input id="set-headless" type="checkbox" /> 无头模式（服务器）</label>
+      <label>企业微信 Key <input id="set-wecom" type="text" /></label>
+      <div class="section-title">自定义 Webhook（优先于企业微信）</div>
+      <label>Webhook URL <input id="set-webhook-url" type="text" placeholder="留空则不启用" /></label>
+      <label>请求方法
+        <select id="set-webhook-method">
+          <option value="POST">POST</option>
+          <option value="GET">GET</option>
+          <option value="PUT">PUT</option>
+        </select>
+      </label>
+      <label>请求头 <input id="set-webhook-headers" type="text" placeholder='JSON 或 "K: V; K2: V2"' /></label>
+      <label>Body 模板
+        <textarea id="set-webhook-body" rows="3" placeholder='留空用默认 JSON；支持 ${title} ${content} 占位符'></textarea>
+      </label>
+      <div class="modal-actions">
+        <button class="btn" data-close>取消</button>
+        <button class="btn btn-primary" id="btn-save-settings">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 登录确认弹窗 -->
+  <div id="modal-login" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head"><h3>启动登录</h3><button class="x" data-close>&times;</button></div>
+      <input id="login-account-id" type="hidden" />
+      <p class="confirm-text">确认为账号 <b id="login-phone"></b> 启动浏览器登录？将自动完成密码登录与验证。</p>
+      <div class="modal-actions">
+        <button class="btn" data-close>取消</button>
+        <button class="btn btn-primary" id="btn-confirm-login">开始登录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 执行任务多选弹窗 -->
+  <div id="modal-run-select" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head"><h3>执行任务</h3><button class="x" data-close>&times;</button></div>
+      <input id="run-account-id" type="hidden" />
+      <p class="confirm-text">选择要执行的任务（在同一浏览器会话内依次完成）：</p>
+      <label class="row"><input type="checkbox" class="run-task" value="checkin" checked /> 签到</label>
+      <label class="row"><input type="checkbox" class="run-task" value="publish" /> 发布动态</label>
+      <label class="row"><input type="checkbox" class="run-task" value="vip" /> 领取 VIP 权益</label>
+      <p class="hint-text">提示：发布动态与领取 VIP 同时勾选时，本次优先执行 VIP。</p>
+      <div class="modal-actions">
+        <button class="btn" data-close>取消</button>
+        <button class="btn btn-primary" id="btn-confirm-run">开始执行</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 删除账号确认弹窗 -->
+  <div id="modal-delete" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head"><h3>删除账号</h3><button class="x" data-close>&times;</button></div>
+      <input id="del-id" type="hidden" />
+      <p class="confirm-text">确认删除账号 <b id="del-phone"></b>？此操作不可撤销。</p>
+      <label class="row"><input id="del-profile" type="checkbox" /> 同时删除该账号的浏览器登录目录（profile）</label>
+      <div class="modal-actions">
+        <button class="btn" data-close>取消</button>
+        <button class="btn btn-danger" id="btn-confirm-delete">删除</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 任务/登录 实时日志弹窗 -->
+  <div id="modal-run" class="modal hidden">
+    <div class="modal-card modal-lg">
+      <div class="modal-head">
+        <h3 id="run-title">运行中</h3>
+        <button class="x" data-close>&times;</button>
+      </div>
+      <input id="run-modal-account" type="hidden" />
+      <div id="qr-box" class="qr-box hidden">
+        <p id="qr-tip"></p>
+        <img id="qr-img" alt="扫码二维码" />
+      </div>
+      <div id="log-box" class="log-box"></div>
+      <div class="modal-actions">
+        <button class="btn btn-danger" id="btn-force-stop">强制停止</button>
+        <button class="btn" id="btn-clear-log">清空</button>
+        <button class="btn" data-close>关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 强制停止确认弹窗 -->
+  <div id="modal-stop" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head"><h3>强制停止</h3><button class="x" data-close>&times;</button></div>
+      <input id="stop-account-id" type="hidden" />
+      <p class="confirm-text">确认强制停止该账号正在运行的任务？将立即关闭其浏览器。</p>
+      <div class="modal-actions">
+        <button class="btn" data-close>取消</button>
+        <button class="btn btn-danger" id="btn-confirm-stop">强制停止</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

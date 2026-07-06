@@ -1,0 +1,59 @@
+name: Build and Push to Docker Hub
+
+on:
+  push:
+    branches: [ master ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      # 设置 QEMU（用于多架构构建）
+      - name: 设置 QEMU
+        uses: docker/setup-qemu-action@v3
+
+      # 设置 Docker Buildx（支持多架构）
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 登录阿里云 ACR
+      - name: 登录阿里云 ACR
+        uses: docker/login-action@v3
+        with:
+          registry: registry.cn-hangzhou.aliyuncs.com
+          username: ${{ secrets.Ali_DOCKER_USERNAME }}
+          password: ${{ secrets.Ali_DOCKER_TOKEN }}
+
+      # 登录 Docker Hub
+      - name: 登录 Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      # 生成 年月日-时分秒 版本号
+      - name: 生成版本标签
+        id: vars
+        run: echo "tag=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+
+      # 构建多架构镜像 + 同时推送到两个平台
+      - name: 构建并推送多架构镜像
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            registry.cn-hangzhou.aliyuncs.com/xinghehy/netease-musician-task:${{ steps.vars.outputs.tag }}
+            registry.cn-hangzhou.aliyuncs.com/xinghehy/netease-musician-task:latest
+
+            xinghehy/netease-musician-task:${{ steps.vars.outputs.tag }}
+            xinghehy/netease-musician-task:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

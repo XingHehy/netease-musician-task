@@ -1,0 +1,12 @@
+log/
+__pycache__/
+*.pyc
+.idea/
+.playwright_profiles/
+*/.playwright_profile_netease
+debug/
+test/
+.claude/
+.env
+.vscode
+app/data/

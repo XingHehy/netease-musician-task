@@ -1,0 +1,132 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #f4f5f7;
+  --card: #ffffff;
+  --text: #1f2329;
+  --muted: #8a9099;
+  --border: #eaecef;
+  --primary: #2f6feb;
+  --primary-dark: #245ac9;
+  --header: #232a34;
+}
+body {
+  font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  background: var(--bg); color: var(--text); font-size: 14px;
+}
+
+.topbar {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 14px 28px; background: var(--header); color: #fff;
+}
+.brand { display: flex; align-items: center; gap: 10px; }
+.brand .logo {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 7px;
+  background: var(--primary); font-size: 16px;
+}
+.topbar h1 { font-size: 16px; font-weight: 600; letter-spacing: .5px; }
+.conn { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #c7ccd4; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: #6b7280; display: inline-block; }
+.dot.on { background: #3fcf5f; }
+.dot.off { background: #ffd23f; }
+
+.container { max-width: 1080px; margin: 24px auto; padding: 0 24px; }
+.toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+.toolbar h2 { font-size: 17px; font-weight: 600; }
+.toolbar-actions { display: flex; gap: 8px; }
+
+.card { background: var(--card); border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.06); padding: 6px 16px; }
+.tbl { width: 100%; border-collapse: collapse; }
+.tbl th, .tbl td { text-align: left; padding: 12px 8px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.tbl tr:last-child td { border-bottom: none; }
+.tbl th { color: var(--muted); font-weight: 500; }
+.ta-r { text-align: right; }
+.tbl td:last-child { text-align: right; white-space: nowrap; }
+.empty { padding: 40px; text-align: center; color: var(--muted); }
+
+.btn {
+  border: 1px solid var(--border); background: #fff; border-radius: 6px;
+  padding: 6px 14px; cursor: pointer; font-size: 13px; color: var(--text);
+  transition: background .15s;
+}
+.btn:hover { background: #f0f2f5; }
+.btn-primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-dark); }
+.btn-sm { padding: 4px 10px; font-size: 12px; margin-left: 4px; }
+.btn-danger { color: #d33; border-color: #f0c9c9; }
+.btn-danger:hover { background: #fdf0f0; }
+.btn-view { background: #eaf3e9; border-color: #b7dcb0; color: #1a9c3e; }
+.btn-view:hover { background: #ddeeda; }
+
+.badge { padding: 3px 10px; border-radius: 12px; font-size: 12px; }
+.badge.ok { background: #e6f7ea; color: #1a9c3e; }
+.badge.expired { background: #fdeaea; color: #d33; }
+.badge.unknown { background: #eef0f2; color: #8a9099; }
+
+/* 弹窗 */
+.modal { position: fixed; inset: 0; background: rgba(20,24,31,.5); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 16px; }
+.modal-card { background: #fff; border-radius: 12px; padding: 22px 24px; width: 400px; max-width: 96vw; max-height: 92vh; overflow-y: auto; }
+.modal-lg { width: 640px; }
+.modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+.modal-head h3 { font-size: 16px; }
+.x { border: none; background: none; font-size: 22px; line-height: 1; color: var(--muted); cursor: pointer; }
+.x:hover { color: var(--text); }
+.modal-card label { display: block; margin-bottom: 14px; font-size: 13px; color: #555; }
+.modal-card label.row { display: flex; align-items: center; gap: 8px; }
+.modal-card input[type=text], .modal-card input[type=password], .modal-card input[type=number], .modal-card input[type=time], .modal-card select, .modal-card textarea {
+  width: 100%; padding: 8px 11px; border: 1px solid var(--border); border-radius: 6px; margin-top: 5px; font-size: 14px;
+}
+.modal-card textarea { resize: vertical; font-family: inherit; }
+.modal-card label.row input { width: auto; margin-top: 0; }
+.section-title { font-size: 13px; font-weight: 600; color: var(--text); margin: 6px 0 12px; padding-top: 8px; border-top: 1px solid var(--border); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.confirm-text { font-size: 14px; line-height: 1.6; margin-bottom: 14px; color: #444; }
+.confirm-text b { color: var(--text); }
+.tag-global { font-size: 11px; color: var(--muted); background: #eef0f2; padding: 1px 6px; border-radius: 8px; margin-left: 4px; }
+.hint-text { font-size: 12px; color: var(--muted); margin: 8px 0 14px; }
+
+.log-box {
+  height: 380px; overflow-y: auto; background: #1b1f27; color: #d4d7dd;
+  border-radius: 8px; padding: 12px; font-family: "Consolas", "Menlo", monospace;
+  font-size: 12px; line-height: 1.65; white-space: pre-wrap;
+}
+.log-line.warn { color: #e6c07b; }
+.log-line.error { color: #e06c75; }
+.log-line .t { color: #6b7280; margin-right: 6px; }
+
+.qr-box { text-align: center; padding: 14px; background: #fff8e6; border-radius: 8px; margin-bottom: 14px; }
+.qr-box img { max-width: 200px; margin-top: 8px; }
+
+.hidden { display: none !important; }
+
+/* 移动端：表格转卡片式 */
+@media (max-width: 720px) {
+  .container { padding: 0 12px; margin: 16px auto; }
+  .toolbar { flex-wrap: wrap; gap: 10px; }
+  .toolbar h2 { width: 100%; }
+
+  .card { padding: 0; background: transparent; box-shadow: none; }
+  .tbl, .tbl thead, .tbl tbody, .tbl tr, .tbl td { display: block; width: 100%; }
+  .tbl thead { display: none; }
+  .tbl tr {
+    background: var(--card); border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.06);
+    padding: 6px 14px; margin-bottom: 12px;
+  }
+  .tbl td {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px;
+    text-align: right; white-space: normal;
+  }
+  .tbl tr td:last-child { border-bottom: none; }
+  .tbl td::before {
+    content: attr(data-label); color: var(--muted); font-weight: 500;
+    margin-right: 12px; text-align: left; flex-shrink: 0;
+  }
+  .tbl td.cell-actions { flex-wrap: wrap; justify-content: flex-start; gap: 8px; padding-top: 12px; }
+  .tbl td.cell-actions::before { width: 100%; margin-bottom: 4px; }
+  .tbl td.cell-actions .btn-sm { margin-left: 0; flex: 1; min-width: 64px; text-align: center; }
+
+  .modal-card { padding: 18px 16px; }
+  .modal-lg { width: 100%; }
+}
+

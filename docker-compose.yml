@@ -1,0 +1,35 @@
+services:
+  netease-musician-task:
+    # 本地构建：
+    build: .
+    image: netease-musician-task:latest
+    # 或使用预构建镜像：
+    # image: xinghehy/netease-musician-task:latest
+    container_name: netease-musician-task
+    restart: always
+    ports:
+      - "8000:8000"
+    volumes:
+      # SQLite / 浏览器 profile / 日志都在 app/data 下，挂载持久化
+      - ./app/data:/app/app/data
+    environment:
+      - TZ=Asia/Shanghai
+      # Web 服务
+      - APP_HOST=0.0.0.0
+      - APP_PORT=8000
+      # 容器内无头运行浏览器
+      - PLAYWRIGHT_HEADLESS=1
+      # 每日任务默认执行时间（HH:MM），账号可单独覆盖
+      - SEND_TIME=09:30
+      # 间隔任务执行间隔天数
+      - EXECUTION_INTERVAL_DAYS=7
+      # 每月最大发布次数
+      - MAX_MONTHLY_SENDS=4
+      # 通知（可选）
+      - WECOM_WEBHOOK_KEY=
+      - CUSTOM_WEBHOOK_URL=
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
