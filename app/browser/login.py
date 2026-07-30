@@ -34,6 +34,10 @@ from app.event_bus import bus
 from app.logging_conf import logger
 
 
+SECONDARY_WAIT_SECONDS = 180  # 二次验证总等待时长
+QR_RETRY_INTERVAL = 15  # 二维码迟迟拿不到时，每隔多少秒重试抓取一次
+
+
 class NetworkRiskError(RuntimeError):
     """页面提示网络环境安全风险时抛出。"""
 
@@ -247,13 +251,68 @@ def solve_slider(page: Page, account_id: Optional[int], max_retry: int = 3) -> b
 
 
 # ---------- 二次验证（登录安全验证）----------
+def new_qr_state() -> dict:
+    """跨多次 check_secondary_verification 调用共享的二次验证状态。"""
+    return {"token": None, "pushed": False, "token_pushed": None, "modal_logged": False}
+
+
+def make_scan_response_hook(qr_state: dict):
+    """常驻 response 监听器：scan-apply 接口一出现就把 pollingToken 缓存下来。
+
+    原实现只在单次点击时用 expect_response 抓取，一旦错过那个窗口（接口早于监听
+    到达、超时、或弹窗结构变化导致点击没落在预期元素上），token 就永久丢失，
+    弹窗会一直停在原地不动（issue #22）。常驻监听彻底消除这个竞态。
+    """
+
+    def _hook(resp) -> None:
+        try:
+            if S.SCAN_APPLY_API not in resp.url:
+                return
+            token = ((resp.json() or {}).get("data") or {}).get("pollingToken")
+            if token:
+                qr_state["token"] = token
+        except Exception:  # noqa: BLE001  监听器内异常绝不能影响主流程
+            pass
+
+    return _hook
+
+
+def _push_scan_qr(account_id: Optional[int], token: str, qr_state: Optional[dict] = None) -> bool:
+    """由 pollingToken 生成二维码并推送到 Web 界面 + 通知渠道。"""
+    if not token:
+        return False
+    if qr_state is not None and qr_state.get("token_pushed") == token:
+        return True  # 同一个 token 不重复推送
+    qr_uri = (
+        "orpheus://rnpage?component=rn-account-verify&isTheme=true"
+        "&immersiveMode=true&route=confirmOldDevice"
+        f"&pollingToken={token}"
+    )
+    qr_url = "https://api.pwmqr.com/qrcode/create/?url=" + urllib.parse.quote(qr_uri, safe="")
+    _emit(account_id, f"[二次验证] 扫码链接：{qr_url}", "warn")
+    bus.qrcode(account_id, qr_url, tip="请用网易云音乐 App 扫码确认登录")
+    _notify_qr(account_id, qr_url)
+    if qr_state is not None:
+        qr_state["pushed"] = True
+        qr_state["token_pushed"] = token
+    return True
+
+
 def check_secondary_verification(
-    page: Page, account_id: Optional[int], *, timeout: int = 10, auto_action: bool = True
+    page: Page,
+    account_id: Optional[int],
+    *,
+    timeout: int = 10,
+    auto_action: bool = True,
+    qr_state: Optional[dict] = None,
 ) -> bool:
     """
     检测登录安全验证弹窗。auto_action=True 时优先走「原设备扫码验证」，
     抓 pollingToken 生成二维码链接并推送到 Web + 通知渠道。
     返回 True 表示检测到弹窗（需要用户处理）。
+
+    qr_state 用于跨多次调用记录「二维码是否已推送」与「弹窗是否已播报」，
+    使等待循环可以重试抓取二维码，同时避免每轮轮询都重复打印同一条日志。
     """
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -263,7 +322,16 @@ def check_secondary_verification(
                 if modal.count() == 0:
                     continue
 
-                _emit(account_id, "[二次验证] 检测到登录安全验证弹窗", "warn")
+                # 只在状态跳变时播报，避免 3 秒一条刷屏（issue #22 的日志表现）
+                if qr_state is None or not qr_state.get("modal_logged"):
+                    _emit(account_id, "[二次验证] 检测到登录安全验证弹窗", "warn")
+                    if qr_state is not None:
+                        qr_state["modal_logged"] = True
+
+                # 常驻监听器可能已经抓到 token，先兑现掉
+                if qr_state is not None and qr_state.get("token") and not qr_state.get("pushed"):
+                    _push_scan_qr(account_id, qr_state["token"], qr_state)
+
                 if not auto_action:
                     return True
 
@@ -280,28 +348,25 @@ def check_secondary_verification(
                         txt = opt.locator(S.SEL_SECONDARY_OPTION_TEXT).first.inner_text(timeout=1000)
                         if "原设备扫码验证" in txt:
                             _emit(account_id, "[二次验证] 选择「原设备扫码验证」，抓取 pollingToken")
+                            token = None
                             try:
                                 with page.expect_response(
                                     lambda r: S.SCAN_APPLY_API in r.url, timeout=15000
                                 ) as resp_info:
                                     opt.click()
                                 payload = resp_info.value.json()
-                                token = (payload or {}).get("data", {}).get("pollingToken")
-                                if token:
-                                    qr_uri = (
-                                        "orpheus://rnpage?component=rn-account-verify&isTheme=true"
-                                        "&immersiveMode=true&route=confirmOldDevice"
-                                        f"&pollingToken={token}"
-                                    )
-                                    qr_url = "https://api.pwmqr.com/qrcode/create/?url=" + urllib.parse.quote(qr_uri, safe="")
-                                    _emit(account_id, f"[二次验证] 扫码链接：{qr_url}", "warn")
-                                    bus.qrcode(account_id, qr_url, tip="请用网易云音乐 App 扫码确认登录")
-                                    _notify_qr(account_id, qr_url)
-                                else:
+                                token = ((payload or {}).get("data") or {}).get("pollingToken")
+                                if not token:
                                     _emit(account_id, f"[二次验证] 未提取到 pollingToken：{payload}", "warn")
                             except Exception as e:  # noqa: BLE001
                                 _emit(account_id, f"[二次验证] 监听扫码接口失败：{e}", "warn")
-                                opt.click()
+                            # 兜底：常驻监听器可能已经抓到 token
+                            if not token and qr_state is not None:
+                                token = qr_state.get("token")
+                            if token:
+                                _push_scan_qr(account_id, token, qr_state)
+                            else:
+                                _emit(account_id, "[二次验证] 本轮未获得二维码，稍后自动重试", "warn")
                             return True
                     except Exception:
                         continue
@@ -392,6 +457,10 @@ def login_account(profile_dir: str, phone: str, password: str, account_id: Optio
     _emit(account_id, f"使用 Playwright 打开登录页，账号：{account_label(account_id, phone=phone)}")
 
     with run_with_context(profile_dir, account_id=account_id, label="登录") as (context, page):
+        # 全程监听扫码验证接口，避免只在单次点击窗口内抓 token（issue #22）
+        qr_state = new_qr_state()
+        page.on("response", make_scan_response_hook(qr_state))
+
         # 先看持久化 profile 是否已是登录态
         try:
             existing = context.cookies("https://music.163.com")
@@ -458,17 +527,38 @@ def login_account(profile_dir: str, phone: str, password: str, account_id: Optio
 
         # 二次验证
         try:
-            if check_secondary_verification(page, account_id, timeout=10):
+            if check_secondary_verification(page, account_id, timeout=10, qr_state=qr_state):
                 _emit(account_id, "[登录] 需要二次验证，等待完成...", "warn")
                 bus.status(account_id, "secondary", "等待二次验证/扫码")
-                deadline = time.time() + 180
+                deadline = time.time() + SECONDARY_WAIT_SECONDS
+                last_retry = time.time()
                 while time.time() < deadline:
-                    if not check_secondary_verification(page, account_id, timeout=2, auto_action=False):
+                    # 常驻监听器随时可能抓到 token，一有就立刻兑现成二维码
+                    if not qr_state["pushed"] and qr_state["token"]:
+                        _push_scan_qr(account_id, qr_state["token"], qr_state)
+                    if not check_secondary_verification(
+                        page, account_id, timeout=2, auto_action=False, qr_state=qr_state
+                    ):
                         _emit(account_id, "[登录] 二次验证已完成")
                         break
+                    # 二维码始终没拿到时定期重新尝试抓取，而不是干等到超时（issue #22）
+                    if not qr_state["pushed"] and time.time() - last_retry >= QR_RETRY_INTERVAL:
+                        last_retry = time.time()
+                        _emit(account_id, "[二次验证] 仍未获得二维码，重试抓取", "warn")
+                        check_secondary_verification(
+                            page, account_id, timeout=3, auto_action=True, qr_state=qr_state
+                        )
                     time.sleep(3)
                 else:
                     _emit(account_id, "[登录] 二次验证等待超时", "warn")
+                if not qr_state["pushed"]:
+                    _emit(
+                        account_id,
+                        "[二次验证] 始终未能获取扫码二维码，请在浏览器弹窗中手动选择验证方式",
+                        "error",
+                    )
+                    _debug_shot(page, phone, "secondary_no_qr", account_id)
+                    bus.status(account_id, "secondary", "二维码获取失败")
         except Exception as e:  # noqa: BLE001
             _emit(account_id, f"检查二次验证出错：{e}", "warn")
 
