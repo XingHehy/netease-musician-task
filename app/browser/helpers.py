@@ -12,7 +12,12 @@ ACCOUNT_INFO_URL = "https://music.163.com/api/nuser/account/get"
 
 
 def scopes(page: Page | Frame):
-    """遍历 main frame + 所有子 frame，处理弹窗在不同 frame 的情况。"""
+    """遍历 main frame + 所有子 frame，处理弹窗在不同 frame 的情况。
+
+    注意：调用方在对每个 scope 使用等待型 API（wait_for / wait_for_function 等）
+    之前，必须先用不带等待的 count() 判断目标元素是否存在于该 scope，否则每个
+    不含目标的 frame 都会死等满一份 timeout。本文件下面的 helper 均遵循此约定。
+    """
     yield page
     frames = page.frames if isinstance(page, Page) else page.page.frames
     main = page.main_frame if isinstance(page, Page) else page.page.main_frame

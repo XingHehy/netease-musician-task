@@ -102,8 +102,12 @@ def _has_slider_modal(page: Page | Frame) -> bool:
 
 
 # ---------- 滑块验证码 ----------
-def solve_slider(page: Page, account_id: Optional[int], max_retry: int = 3) -> None:
-    """网易云 yidun 滑块：ddddocr 优先 + OpenCV 兜底 + 人类轨迹拖动。"""
+def solve_slider(page: Page, account_id: Optional[int], max_retry: int = 3) -> bool:
+    """网易云 yidun 滑块：ddddocr 优先 + OpenCV 兜底 + 人类轨迹拖动。
+
+    返回 True 表示已通过或本来就没弹验证码，False 表示多次尝试后仍未通过
+    （供上层决定是否降级到扫码登录）。
+    """
     import cv2
     import numpy as np
     from ddddocr import DdddOcr
@@ -153,7 +157,7 @@ def solve_slider(page: Page, account_id: Optional[int], max_retry: int = 3) -> N
     if not modal_found:
         _ensure_no_network_risk(page, account_id, "确认无滑块弹窗前")
         _emit(account_id, "未触发验证码，跳过滑块验证")
-        return
+        return True
 
     ocr = DdddOcr(det=False, ocr=False, show_ad=False)
 
@@ -161,6 +165,10 @@ def solve_slider(page: Page, account_id: Optional[int], max_retry: int = 3) -> N
         _emit(account_id, f"[滑块] 第 {attempt} 次尝试")
         for scope in scopes(page):
             try:
+                # 先用不带等待的 count() 排除掉不含验证码的 frame。
+                # 否则 wait_for_function 会在每个无关 frame 上死等满 timeout。
+                if scope.locator(S.SEL_YIDUN_BG).count() == 0:
+                    continue
                 wait_real_image(scope, S.SEL_YIDUN_BG)
                 wait_real_image(scope, S.SEL_YIDUN_JIGSAW, min_width=40)
 
@@ -218,7 +226,7 @@ def solve_slider(page: Page, account_id: Optional[int], max_retry: int = 3) -> N
 
                 if scope.locator(S.SEL_YIDUN_SLIDER).count() == 0:
                     _emit(account_id, "[滑块] 验证成功！")
-                    return
+                    return True
 
                 if attempt < max_retry:
                     _emit(account_id, f"[滑块] 第 {attempt} 次失败，刷新重试", "warn")
@@ -235,6 +243,7 @@ def solve_slider(page: Page, account_id: Optional[int], max_retry: int = 3) -> N
                 continue
 
     _emit(account_id, "[滑块] 多次尝试后仍未通过", "warn")
+    return False
 
 
 # ---------- 二次验证（登录安全验证）----------
