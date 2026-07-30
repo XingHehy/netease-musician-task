@@ -416,6 +416,20 @@ def _notify_qr(account_id: Optional[int], qr_url: str, *, message: Optional[str]
 
 
 # ---------- 扫码登录 ----------
+def _open_login_page(page: Page) -> None:
+    """打开（或强制重新打开）登录页。
+
+    LOGIN_URL 是 hash 路由（`music.163.com/#/login?...`）。当页面已经停在同一个
+    URL 上时，`page.goto()` 只是改 hash，不会重新加载文档 —— 登录视图会停在上次
+    的密码表单或安全验证弹窗上，二维码 canvas 永远不会出现。所以这里必须显式
+    reload，否则「重新加载登录页」是个空操作。
+    """
+    if page.url.split("#")[0] == S.LOGIN_URL.split("#")[0]:
+        page.reload(wait_until="domcontentloaded")
+    else:
+        page.goto(S.LOGIN_URL, wait_until="domcontentloaded")
+
+
 def _grab_qr_data_uri(page: Page) -> Optional[str]:
     """把登录页里的二维码导出成 data URI（二维码画布在子 iframe 内）。"""
     for scope in scopes(page):
@@ -443,7 +457,7 @@ def login_with_qrcode(
     二维码依赖或第三方二维码服务。
     """
     _emit(account_id, "[扫码登录] 打开登录页，等待二维码生成")
-    page.goto(S.LOGIN_URL, wait_until="domcontentloaded")
+    _open_login_page(page)
 
     deadline = time.time() + timeout
     last_src: Optional[str] = None
@@ -484,7 +498,7 @@ def login_with_qrcode(
                 misses = 0
                 last_src = None
                 _emit(account_id, f"[扫码登录] 未取到二维码，重新加载登录页（第 {reloads} 次）", "warn")
-                page.goto(S.LOGIN_URL, wait_until="domcontentloaded")
+                _open_login_page(page)
 
         time.sleep(2)
 
@@ -568,7 +582,7 @@ def login_account(profile_dir: str, phone: str, password: str, account_id: Optio
             _emit(account_id, "登录方式为「扫码登录」，跳过密码登录")
 
         if not use_qr:
-            page.goto(S.LOGIN_URL, wait_until="domcontentloaded")
+            _open_login_page(page)
             _emit(account_id, "开始执行自动登录流程")
 
             try:
