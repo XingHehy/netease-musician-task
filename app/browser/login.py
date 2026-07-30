@@ -37,6 +37,12 @@ from app.logging_conf import logger
 
 SECONDARY_WAIT_SECONDS = 180  # 二次验证总等待时长
 QR_RETRY_INTERVAL = 15  # 二维码迟迟拿不到时，每隔多少秒重试抓取一次
+# 拖动后轮询等待验证码消失的时长。真机实测（2026-07-30）：滑块通过后易盾要
+# 约 6.3s 才撤掉验证码，所以固定 sleep(2) 必然误判成失败。留一倍余量到 12s；
+# 这段等待只在滑块真的没过时才会全额付出，仍远小于原实现单次刷新点击的 30s。
+SLIDER_PASS_WAIT = 12
+SLIDER_REDRAW_WAIT = 8  # 每轮重试前等待易盾重建验证码的时长
+SLIDER_REFRESH_TIMEOUT = 5000  # 点「刷新」按钮的超时（ms），失败即视为验证码正在重建
 QRCODE_LOGIN_TIMEOUT = 300  # 扫码登录等待用户扫码的时长
 QRCODE_MAX_RELOAD = 3  # 扫码登录期间最多重新加载登录页的次数
 CONFIRM_WAIT_SECONDS = 60  # 等待服务端确认登录态的时长
@@ -109,6 +115,33 @@ def _has_slider_modal(page: Page | Frame) -> bool:
     return False
 
 
+def _brief(exc: Exception, limit: int = 160) -> str:
+    """取异常首行。Playwright 的超时异常会带上整段 call log，
+    直接塞进日志会把界面刷屏（真实登录日志里就出现过几十行的 call log）。"""
+    text = str(exc).strip().splitlines()
+    head = text[0].strip() if text else exc.__class__.__name__
+    return head[:limit]
+
+
+def _wait_captcha_present(page: Page, timeout: float) -> bool:
+    """轮询等待滑块验证码图片就位。
+
+    失败一次后易盾会拆掉并重建整个验证码 iframe，重建期间 SEL_YIDUN_BG 短时为 0。
+    原实现在每轮重试开头直接遍历 scopes() 并 count()==0 就 continue，于是第 2、3 次
+    尝试在 0 秒内空转结束，3 次重试实际只滑了 1 次。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            for scope in scopes(page):
+                if scope.locator(S.SEL_YIDUN_BG).count() > 0:
+                    return True
+        except Exception:  # noqa: BLE001  frame 正在重建时 count() 可能抛错
+            pass
+        time.sleep(0.3)
+    return False
+
+
 # ---------- 滑块验证码 ----------
 def solve_slider(page: Page, account_id: Optional[int], max_retry: int = 3) -> bool:
     """网易云 yidun 滑块：ddddocr 优先 + OpenCV 兜底 + 人类轨迹拖动。
@@ -148,7 +181,12 @@ def solve_slider(page: Page, account_id: Optional[int], max_retry: int = 3) -> b
                 raise RuntimeError(f"滑块图尺寸异常：{w}x{h}")
         except Exception as e:
             _emit(account_id, f"图片尺寸校验失败，自动刷新验证码：{e}", "warn")
-            scope.locator(S.SEL_YIDUN_REFRESH).first.click()
+            try:
+                scope.locator(S.SEL_YIDUN_REFRESH).first.click(
+                    timeout=SLIDER_REFRESH_TIMEOUT
+                )
+            except Exception as click_err:  # noqa: BLE001  同上，不能用默认 30s 超时
+                _emit(account_id, f"[滑块] 刷新按钮不可点击：{_brief(click_err)}", "warn")
             time.sleep(1)
             raise RuntimeError(f"图片无效，已刷新：{e}")
         return resp.content
@@ -171,6 +209,15 @@ def solve_slider(page: Page, account_id: Optional[int], max_retry: int = 3) -> b
 
     for attempt in range(1, max_retry + 1):
         _emit(account_id, f"[滑块] 第 {attempt} 次尝试")
+        # 上一轮失败后易盾要重建验证码，这里等它重绘完再进 scopes()，
+        # 否则本轮会在 0 秒内空转、白白吃掉一次重试机会。
+        if not _wait_captcha_present(page, SLIDER_REDRAW_WAIT):
+            if not _has_slider_modal(page):
+                # 验证码弹窗整体消失：通常是服务端已放行、流程推进到下一步。
+                _emit(account_id, "[滑块] 验证码弹窗已消失，登录流程可能已推进")
+                return True
+            _emit(account_id, f"[滑块] 第 {attempt} 次等待验证码重绘超时", "warn")
+            continue
         for scope in scopes(page):
             try:
                 # 先用不带等待的 count() 排除掉不含验证码的 frame。
@@ -230,15 +277,40 @@ def solve_slider(page: Page, account_id: Optional[int], max_retry: int = 3) -> b
                 time.sleep(0.05)
                 page.mouse.move(start_x + total, start_y, steps=2)
                 page.mouse.up()
-                time.sleep(2)
 
-                if scope.locator(S.SEL_YIDUN_SLIDER).count() == 0:
+                # 松手后服务端校验有网络延迟，验证码不会立刻消失。原实现只看
+                # time.sleep(2) 之后的那一瞬，服务端稍慢就误判成失败——真实登录里
+                # 滑块其实已通过并进入了安全验证，却被判为失败而降级扫码。
+                passed = False
+                deadline = time.time() + SLIDER_PASS_WAIT
+                while time.time() < deadline:
+                    try:
+                        if scope.locator(S.SEL_YIDUN_SLIDER).count() == 0:
+                            passed = True
+                            break
+                    except Exception:  # noqa: BLE001  验证码 iframe 被整体拆掉 = 已推进
+                        passed = True
+                        break
+                    time.sleep(0.4)
+
+                if passed:
                     _emit(account_id, "[滑块] 验证成功！")
                     return True
 
                 if attempt < max_retry:
                     _emit(account_id, f"[滑块] 第 {attempt} 次失败，刷新重试", "warn")
-                    scope.locator(S.SEL_YIDUN_REFRESH).first.click()
+                    # 验证失败后易盾常把刷新按钮隐藏并重建验证码，此时点不到属正常。
+                    # 原实现用默认 30s 超时，一次点击就烧掉了剩余两次重试的时间预算。
+                    try:
+                        scope.locator(S.SEL_YIDUN_REFRESH).first.click(
+                            timeout=SLIDER_REFRESH_TIMEOUT
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        _emit(
+                            account_id,
+                            f"[滑块] 刷新按钮不可点击，等验证码自行重绘：{_brief(e)}",
+                            "warn",
+                        )
                     time.sleep(2)
                     break
             except cv2.error as e:
@@ -247,7 +319,8 @@ def solve_slider(page: Page, account_id: Optional[int], max_retry: int = 3) -> b
                     time.sleep(1)
                 continue
             except Exception as e:  # noqa: BLE001
-                _emit(account_id, f"[滑块] 第 {attempt} 次尝试失败：{e}", "warn")
+                # 只取首行：Playwright 超时异常会附带整段 call log，原样输出会刷屏
+                _emit(account_id, f"[滑块] 第 {attempt} 次尝试失败：{_brief(e)}", "warn")
                 continue
 
     _emit(account_id, "[滑块] 多次尝试后仍未通过", "warn")
@@ -577,6 +650,9 @@ def login_account(profile_dir: str, phone: str, password: str, account_id: Optio
         if method not in LOGIN_METHODS:
             method = "auto"
         use_qr = method == "qrcode"
+        # use_qr 会被后续降级逻辑改写，这里单独记下「本次是否真的走过密码登录」，
+        # 用于判断要不要检查二次验证弹窗（见下方二次验证段的注释）。
+        attempted_password = not use_qr
         fallback_reason = ""
         if use_qr:
             _emit(account_id, "登录方式为「扫码登录」，跳过密码登录")
@@ -637,9 +713,23 @@ def login_account(profile_dir: str, phone: str, password: str, account_id: Optio
             bus.status(account_id, "login_fail", "网络环境风险")
             return {"ok": False, "cookie_str": "", "message": "network risk"}
 
-        # 二次验证
+        # 二次验证。
+        # 这里必须用 attempted_password 而不是 not use_qr：滑块判定失败有可能是假阴性
+        # （服务端其实已放行并弹出了「登录安全验证」），若因 use_qr=True 而跳过本段，
+        # 弹窗就完全不会被处理，页面卡在弹窗上，扫码降级也因页面没变而拿不到二维码。
         try:
-            if not use_qr and check_secondary_verification(page, account_id, timeout=10, qr_state=qr_state):
+            if attempted_password and check_secondary_verification(
+                page, account_id, timeout=10, qr_state=qr_state
+            ):
+                if use_qr:
+                    # 弹窗存在 = 密码登录已被服务端受理，撤销滑块失败触发的扫码降级
+                    _emit(
+                        account_id,
+                        f"[登录] 已进入登录安全验证，取消扫码降级（{fallback_reason or '滑块判定失败'}）",
+                        "warn",
+                    )
+                    use_qr = False
+                    fallback_reason = ""
                 _emit(account_id, "[登录] 需要二次验证，等待完成...", "warn")
                 bus.status(account_id, "secondary", "等待二次验证/扫码")
                 deadline = time.time() + SECONDARY_WAIT_SECONDS
