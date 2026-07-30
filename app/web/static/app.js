@@ -354,6 +354,7 @@ $("#btn-settings").addEventListener("click", async () => {
   $("#set-interval").value = s.execution_interval_days || "";
   $("#set-max-sends").value = s.max_monthly_sends || "";
   $("#set-headless").checked = s.headless === "1";
+  $("#set-login-method").value = s.login_method || "auto";
   $("#set-wecom").value = s.wecom_webhook_key || "";
   $("#set-webhook-url").value = s.custom_webhook_url || "";
   $("#set-webhook-method").value = s.custom_webhook_method || "POST";
@@ -370,6 +371,7 @@ $("#btn-save-settings").addEventListener("click", async () => {
     execution_interval_days: $("#set-interval").value.trim(),
     max_monthly_sends: $("#set-max-sends").value.trim(),
     headless: $("#set-headless").checked ? "1" : "0",
+    login_method: $("#set-login-method").value,
     wecom_webhook_key: $("#set-wecom").value.trim(),
     custom_webhook_url: $("#set-webhook-url").value.trim(),
     custom_webhook_method: $("#set-webhook-method").value,

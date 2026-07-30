@@ -52,6 +52,37 @@ SEL_SHARE_BTN = "a.u-btn2.u-btn2-2.u-btn2-w2.j-flag[data-action='share']"
 SEL_VIP_CONTAINER = "div.vip-container"
 SEL_VIP_CHECK = "span.check"
 
+# ---- 扫码登录 ----
+# 网易云登录页默认视图就是扫码登录，二维码由页面内的 <canvas> 本地绘制
+# （实测 152x152，位于 music.163.com/login 这个 iframe 内）。用 toDataURL()
+# 导出成 data URI 即可直接交给前端 <img> 显示，无需任何第三方二维码服务。
+# 兜底也支持内联 <img src="data:image">，以防前端实现改动。
+QR_EXTRACT_SCRIPT = """
+    () => {
+        const area = (w, h) => w * h;
+        // 二维码是近似正方形的大尺寸画布，借此排除各种小图标
+        const squarish = (w, h) => w >= 100 && h >= 100 && Math.abs(w - h) <= w * 0.2;
+        const canvases = Array.from(document.querySelectorAll('canvas'))
+            .filter(c => squarish(c.width, c.height))
+            .sort((a, b) => area(b.width, b.height) - area(a.width, a.height));
+        for (const c of canvases) {
+            try {
+                const uri = c.toDataURL('image/png');
+                if (uri && uri.length > 800) return uri;
+            } catch (e) { /* 画布被跨域污染时跳过 */ }
+        }
+        const imgs = Array.from(document.querySelectorAll('img'))
+            .filter(im => (im.src || '').startsWith('data:image')
+                          && squarish(im.naturalWidth, im.naturalHeight))
+            .sort((a, b) => area(b.naturalWidth, b.naturalHeight)
+                            - area(a.naturalWidth, a.naturalHeight));
+        for (const im of imgs) {
+            if (im.src.length > 800) return im.src;
+        }
+        return null;
+    }
+"""
+
 # ---- 常量 ----
 NETWORK_SECURITY_RISK_TEXT = "您当前的网络环境存在安全风险"
 VIP_TASK_NAME = "即日起30天内发布图文笔记天数≥4"

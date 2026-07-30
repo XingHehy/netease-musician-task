@@ -14,6 +14,7 @@ _EDITABLE = {
     "execution_interval_days",
     "max_monthly_sends",
     "headless",
+    "login_method",
     "wecom_webhook_key",
     "custom_webhook_url",
     "custom_webhook_method",

@@ -48,12 +48,19 @@ CUSTOM_WEBHOOK_METHOD = os.getenv("CUSTOM_WEBHOOK_METHOD", "POST")
 CUSTOM_WEBHOOK_HEADERS = os.getenv("CUSTOM_WEBHOOK_HEADERS", "")
 CUSTOM_WEBHOOK_BODY = os.getenv("CUSTOM_WEBHOOK_BODY", "")
 
+# 登录方式：auto（密码优先，失败自动转扫码）/ password（仅密码）/ qrcode（仅扫码）
+LOGIN_METHODS = ("auto", "password", "qrcode")
+LOGIN_METHOD = os.getenv("LOGIN_METHOD", "auto").strip().lower()
+if LOGIN_METHOD not in LOGIN_METHODS:
+    LOGIN_METHOD = "auto"
+
 # settings 表首次播种用的默认全局设置
 SETTINGS_SEED = {
     "default_send_time": DEFAULT_SEND_TIME,
     "execution_interval_days": str(DEFAULT_INTERVAL_DAYS),
     "max_monthly_sends": str(MAX_MONTHLY_SENDS),
     "headless": "1" if HEADLESS else "0",
+    "login_method": LOGIN_METHOD,
     "wecom_webhook_key": WECOM_WEBHOOK_KEY,
     "custom_webhook_url": CUSTOM_WEBHOOK_URL,
     "custom_webhook_method": CUSTOM_WEBHOOK_METHOD,

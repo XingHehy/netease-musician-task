@@ -109,6 +109,14 @@
         <label class="row"
           ><input id="set-headless" type="checkbox" /> 无头模式（服务器）</label
         >
+        <label
+          >登录方式
+          <select id="set-login-method">
+            <option value="auto">自动（密码优先，失败转扫码）</option>
+            <option value="password">仅密码登录</option>
+            <option value="qrcode">仅扫码登录（不触发滑块）</option>
+          </select>
+        </label>
         <div class="section-title">修改管理密码</div>
         <label>当前管理密码 <input id="set-current-admin-password" type="password" autocomplete="current-password" /></label>
         <label>新管理密码 <input id="set-new-admin-password" type="password" autocomplete="new-password" placeholder="留空则不修改" /></label>
