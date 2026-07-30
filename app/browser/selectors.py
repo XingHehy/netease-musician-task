@@ -62,12 +62,28 @@ QR_EXTRACT_SCRIPT = """
         const area = (w, h) => w * h;
         // 二维码是近似正方形的大尺寸画布，借此排除各种小图标
         const squarish = (w, h) => w >= 100 && h >= 100 && Math.abs(w - h) <= w * 0.2;
+        // 页面上的二维码 canvas 只有 ~152px 且几乎没有静区，直接推给前端时
+        // 每个模块仅 1~2px，手机扫码成功率偏低。这里按整数倍最近邻放大并补上
+        // 静区再导出（纯 canvas 操作，不引入任何二维码依赖）。
+        const enlarge = (src, w, h) => {
+            const scale = Math.max(2, Math.ceil(300 / w));
+            const pad = Math.round(w * 0.13) * scale;   // ≈4 个模块宽的静区
+            const out = document.createElement('canvas');
+            out.width = w * scale + pad * 2;
+            out.height = h * scale + pad * 2;
+            const ctx = out.getContext('2d');
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, out.width, out.height);
+            ctx.imageSmoothingEnabled = false;          // 最近邻，保持模块边缘锐利
+            ctx.drawImage(src, pad, pad, w * scale, h * scale);
+            return out.toDataURL('image/png');
+        };
         const canvases = Array.from(document.querySelectorAll('canvas'))
             .filter(c => squarish(c.width, c.height))
             .sort((a, b) => area(b.width, b.height) - area(a.width, a.height));
         for (const c of canvases) {
             try {
-                const uri = c.toDataURL('image/png');
+                const uri = enlarge(c, c.width, c.height);
                 if (uri && uri.length > 800) return uri;
             } catch (e) { /* 画布被跨域污染时跳过 */ }
         }
