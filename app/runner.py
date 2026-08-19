@@ -41,6 +41,21 @@ def _record_auth_state(account_id: int, result: dict) -> bool:
     return True
 
 
+def _notify_auto_login_failure(account_id: int, account: dict, result: dict) -> None:
+    """定时任务自动恢复登录失败时通知；二维码提醒仍由登录模块负责。"""
+    account_name = account_label(account_id, account=account)
+    message = result.get("message") or "未知原因"
+    try:
+        send_configured_notification(
+            f"账号：{account_name}\n自动登录未完成：{message}\n请打开管理页面查看日志并重新登录。",
+            title="网易音乐人自动登录失败",
+            event="auto_login_failed",
+            extra={"account": account_name, "message": message},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"自动登录失败通知发送异常：{exc}")
+
+
 # ---------- 登录 ----------
 def run_login(account_id: int) -> dict:
     acc = repo.get_account(account_id)
@@ -437,23 +452,54 @@ def run_daily_for_account(account_id: int) -> None:
                           f"（{'执行' if decision['run'] else '跳过'}）")
 
     publish_msg = f"{datetime.now().strftime('%Y年%m月%d日 %H:%M')} 分享音乐"
-    try:
-        res = _run_blocking(
+    def _execute_daily(current_account: dict) -> dict:
+        return _run_blocking(
             do_daily_run,
-            acc["profile_dir"],
+            current_account["profile_dir"],
             account_id,
             run_checkin=True,
             run_interval=decision["run"],
             interval_kind=decision["kind"],
             publish_msg=publish_msg,
         )
+
+    try:
+        res = _execute_daily(acc)
     except Exception as e:  # noqa: BLE001
         logger.exception("每日任务异常")
         repo.add_log(account_id, "daily", "fail", str(e))
         return
 
     if not _record_auth_state(account_id, res):
-        return
+        _emit_run(account_id, "每日任务检测到登录态失效，自动发起登录流程")
+        repo.add_log(account_id, "login", "info", "每日任务触发自动重新登录")
+        login_result = run_login(account_id)
+        if not login_result.get("ok"):
+            _emit_run(
+                account_id,
+                f"自动登录未完成：{login_result.get('message', '未知原因')}；本次每日任务停止",
+            )
+            _notify_auto_login_failure(account_id, acc, login_result)
+            return
+
+        _emit_run(account_id, "自动登录成功，重新执行本次每日任务")
+        refreshed = repo.get_account(account_id)
+        if not refreshed:
+            return
+        try:
+            res = _execute_daily(refreshed)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("自动登录后的每日任务重试异常")
+            repo.add_log(account_id, "daily", "fail", f"自动登录后重试失败：{e}")
+            return
+        if not _record_auth_state(account_id, res):
+            _emit_run(account_id, "自动登录后仍未通过登录态校验，本次每日任务停止")
+            _notify_auto_login_failure(
+                account_id,
+                refreshed,
+                {"message": "自动登录后仍未通过服务端登录态校验"},
+            )
+            return
 
     # 分别记录音乐人签到和日常签到结果
     checkin = res.get("checkin") or {}

@@ -623,12 +623,18 @@ def _make_password_login_response_hook(state: dict):
 
 
 def _password_login_error(page: Page, state: dict) -> Optional[str]:
-    """返回明确的密码登录错误；未发现时返回 None。"""
+    """只返回可确定应终止流程的凭据错误；验证挑战应继续处理。"""
     data = state.get("data")
     if isinstance(data, dict):
         code = data.get("code")
-        if code != 200:
-            message = data.get("message") or data.get("msg") or f"登录接口返回 code={code}"
+        message = str(data.get("message") or data.get("msg") or "").strip()
+        # 8830 表示密码提交已受理，但需要进入登录安全验证。验证码、风控等
+        # 非 200 响应也必须交给后续页面流程处理，不能笼统判为密码失败。
+        credential_error = any(
+            text in message for text in ("账号或密码错误", "手机号或密码错误", "密码错误")
+        )
+        if credential_error:
+            message = message or "账号或密码错误"
             return f"{message}（code={code}）"
 
     error_texts = ["账号或密码错误", "手机号或密码错误", "密码错误"]
