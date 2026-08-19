@@ -28,8 +28,8 @@ jobs:
       - name: 设置 QEMU
         uses: docker/setup-qemu-action@v3
 
-      # 设置 Docker Buildx（支持多架构）
-      - name: 设置 Docker Buildx-action@v3
+      # 设置 Docker Buildx
+      - name: 设置 Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       # 登录阿里云 ACR
@@ -73,9 +73,12 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "最终使用镜像版本: $tag"
 
-      # 构建多架构镜像 + 同时推送到两个平台
+      # 构建并推送多架构镜像
       - name: 构建并推送多架构镜像
         uses: docker/build-push-action@v5
+        env:
+          # 关键修复：关闭buildkit empty manifest，解决阿里云ACR denied错误
+          BUILDKIT_MULTI_PLATFORM_EMPTY_MANIFEST: "false"
         with:
           context: .
           platforms: linux/amd64,linux/arm64
