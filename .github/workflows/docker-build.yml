@@ -1,13 +1,17 @@
 name: Build and Push to Docker Hub
 
-# 两种触发方式：推送master分支 / 手动运行
+# 两种触发方式：
+# 1. 推送 master 分支
+# 2. 手动运行
 on:
   push:
-    branches: [master]
+    branches:
+      - master
     paths-ignore:
       - "**.md"
       - "docs/**"
-      - ".github/**" # 新增：忽略工作流配置文件修改
+      - ".github/**"
+
   workflow_dispatch:
     inputs:
       version_tag:
@@ -18,13 +22,19 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # 自动push场景：提交信息以v开头才执行；手动触发无条件执行
+
+    # 自动 push：
+    # 只有 commit message 以 v 开头才执行
+    # 手动触发：
+    # 无条件执行
     if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'v') }}
+
     steps:
+      # 拉取代码
       - name: 拉取代码
         uses: actions/checkout@v4
 
-      # 设置 QEMU（用于多架构构建）
+      # 设置 QEMU，用于构建 ARM64 镜像
       - name: 设置 QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -47,47 +57,58 @@ jobs:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
-      # 解析最终版本tag：手动输入优先，否则从commit message提取
-      - name: 解析版本标签tag
+      # 解析最终版本 tag
+      # 手动触发：使用输入的 version_tag
+      # 自动触发：从 commit message 第一行第一个字段读取版本号
+      - name: 解析版本标签
         id: vars
         env:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_VERSION_TAG: ${{ github.event.inputs.version_tag }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        shell: bash
         run: |
+          set -e
+
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            # 手动运行，取输入框版本
             tag="$INPUT_VERSION_TAG"
           else
-            # push自动触发，解析commit第一行第一个字段
             first_line="${COMMIT_MESSAGE%%$'\n'*}"
             tag="${first_line%%[[:space:]]*}"
           fi
 
-          # 校验版本格式必须 v数字.数字.数字
+          # 校验版本格式：必须为 vX.X.X
           if ! [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::版本格式非法：$tag，必须为 vX.X.X 格式"
+            echo "::error::版本格式非法：$tag，必须为 vX.X.X 格式，例如 v2.0.7"
             exit 1
           fi
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "最终使用镜像版本: $tag"
 
-      # 构建并推送多架构镜像
+      # 构建并同时推送：
+      # - 阿里云 ACR
+      # - Docker Hub
+      #
+      # provenance / sbom 关闭是为了解决阿里云 ACR：
+      # unknown manifest class for application/vnd.oci.empty.v1+json
       - name: 构建并推送多架构镜像
-        uses: docker/build-push-action@v5
-        env:
-          # 关键修复：关闭buildkit empty manifest，解决阿里云ACR denied错误
-          BUILDKIT_MULTI_PLATFORM_EMPTY_MANIFEST: "false"
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+
+          # 避免 BuildKit 生成额外 OCI attestation manifest，
+          # 防止阿里云 ACR 不兼容 application/vnd.oci.empty.v1+json
+          provenance: false
+          sbom: false
+
           tags: |
             registry.cn-hangzhou.aliyuncs.com/xinghehy/netease-musician-task:${{ steps.vars.outputs.tag }}
             registry.cn-hangzhou.aliyuncs.com/xinghehy/netease-musician-task:latest
-
             xinghehy/netease-musician-task:${{ steps.vars.outputs.tag }}
             xinghehy/netease-musician-task:latest
+
           cache-from: type=gha
           cache-to: type=gha,mode=max
