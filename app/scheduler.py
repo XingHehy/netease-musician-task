@@ -11,7 +11,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app import repository as repo
 from app.logging_conf import logger
 from app.account_identity import account_label
-from app.runner import run_daily_for_account, run_auto_listen_for_account, run_auto_local_listen_for_account
+from app.runner import run_daily_for_account, run_auto_local_listen_for_account
 
 scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
 
@@ -27,9 +27,6 @@ def _parse_hhmm(s: str, default: str = "09:30") -> tuple[int, int]:
 
 def _job_id(account_id: int) -> str:
     return f"daily_account_{account_id}"
-
-def _listen_job_id(account_id: int) -> str:
-    return f"listen_account_{account_id}"
 
 
 def _local_listen_job_id(account_id: int) -> str:
@@ -57,17 +54,6 @@ def reschedule_all() -> None:
                 misfire_grace_time=3600,
             )
             logger.info(f"已排程账号 {account_label(acc['id'], account=acc)} 每日任务：{run_time}")
-            listen_time = repo.get_setting("listen_start_time", "09:30") or "09:30"
-            lh, lm = _parse_hhmm(listen_time, "09:30")
-            scheduler.add_job(
-                run_auto_listen_for_account,
-                trigger=CronTrigger(hour=lh, minute=lm),
-                args=[acc["id"]],
-                id=_listen_job_id(acc["id"]),
-                replace_existing=True,
-                misfire_grace_time=3600,
-            )
-            logger.info(f"已排程账号 {account_label(acc['id'], account=acc)} 听歌任务：{listen_time}")
         if acc.get("local_listen_enabled"):
             local_time = repo.get_setting("local_listen_start_time", "10:00") or "10:00"
             local_h, local_m = _parse_hhmm(local_time, "10:00")

@@ -696,6 +696,49 @@ def do_login_with_phone(page: Page, phone: str, password: str, account_id: Optio
     _emit(account_id, "已点击「登录」")
 
 
+def _make_password_login_response_hook(state: dict):
+    """捕获手机号密码登录响应，供主流程及时识别密码错误。"""
+    def _hook(response) -> None:
+        try:
+            if "/weapi/login/cellphone" not in response.url:
+                return
+            if response.request.method != "POST":
+                return
+            data = response.json()
+            if isinstance(data, dict):
+                state["data"] = data
+        except Exception:
+            return
+    return _hook
+
+
+def _password_login_error(page: Page, state: dict) -> Optional[str]:
+    """只返回可确定应终止流程的凭据错误；验证挑战应继续处理。"""
+    data = state.get("data")
+    if isinstance(data, dict):
+        code = data.get("code")
+        message = str(data.get("message") or data.get("msg") or "").strip()
+        # 8830 表示密码提交已受理，但需要进入登录安全验证。验证码、风控等
+        # 非 200 响应也必须交给后续页面流程处理，不能笼统判为密码失败。
+        credential_error = any(
+            text in message for text in ("账号或密码错误", "手机号或密码错误", "密码错误")
+        )
+        if credential_error:
+            message = message or "账号或密码错误"
+            return f"{message}（code={code}）"
+
+    error_texts = ["账号或密码错误", "手机号或密码错误", "密码错误"]
+    for scope in scopes(page):
+        for text in error_texts:
+            try:
+                loc = scope.get_by_text(text, exact=False)
+                if loc.count() > 0 and loc.first.is_visible():
+                    return text
+            except Exception:
+                continue
+    return None
+
+
 # ---------- 提取 uid / 昵称 ----------
 def _fetch_user_info(page: Page, account_id: Optional[int]) -> tuple[Optional[str], Optional[str]]:
     """
@@ -723,6 +766,19 @@ def login_account(profile_dir: str, phone: str, password: str, account_id: Optio
         # 全程监听扫码验证接口，避免只在单次点击窗口内抓 token（issue #22）
         qr_state = new_qr_state()
         page.on("response", make_scan_response_hook(qr_state))
+        password_login_state: dict = {"data": None}
+        page.on("response", _make_password_login_response_hook(password_login_state))
+
+        def _fail_on_password_error(wait_ms: int = 0) -> Optional[dict]:
+            if wait_ms:
+                page.wait_for_timeout(wait_ms)
+            detail = _password_login_error(page, password_login_state)
+            if not detail:
+                return None
+            _emit(account_id, f"[登录] 密码登录失败：{detail}", "error")
+            _debug_shot(page, phone, "password_login_error", account_id)
+            bus.status(account_id, "login_fail", detail)
+            return {"ok": False, "cookie_str": "", "message": detail}
 
         # 先看持久化 profile 是否已是登录态
         try:
@@ -762,6 +818,9 @@ def login_account(profile_dir: str, phone: str, password: str, account_id: Optio
 
             try:
                 do_login_with_phone(page, phone, password, account_id)
+                password_error = _fail_on_password_error(wait_ms=2000)
+                if password_error:
+                    return password_error
             except Exception as e:  # noqa: BLE001
                 _emit(account_id, f"登录表单填写异常：{e}", "error")
                 _debug_shot(page, phone, "login_flow_error", account_id)
@@ -796,6 +855,9 @@ def login_account(profile_dir: str, phone: str, password: str, account_id: Optio
             fill_first(page, S.SEL_PWD_INPUT, password)
             time.sleep(random.uniform(0.2, 0.5))
             click_first(page, S.SEL_LOGIN_BTN, timeout=10000)
+            password_error = _fail_on_password_error(wait_ms=2000)
+            if password_error:
+                return password_error
             if _has_slider_modal(page):
                 try:
                     solve_slider(page, account_id)
@@ -811,6 +873,10 @@ def login_account(profile_dir: str, phone: str, password: str, account_id: Optio
             _debug_shot(page, phone, "network_risk", account_id)
             bus.status(account_id, "login_fail", "网络环境风险")
             return {"ok": False, "cookie_str": "", "message": "network risk"}
+
+        password_error = _fail_on_password_error()
+        if password_error:
+            return password_error
 
         # 二次验证。
         # 这里必须用 attempted_password 而不是 not use_qr：滑块判定失败有可能是假阴性

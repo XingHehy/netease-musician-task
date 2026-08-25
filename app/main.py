@@ -74,16 +74,16 @@ async def auth_page() -> str:
 # 路由注册
 from app.api import accounts as accounts_api  # noqa: E402
 from app.api import auth as auth_api  # noqa: E402
+from app.api import debug as debug_api  # noqa: E402
 from app.api import login as login_api  # noqa: E402
-from app.api import listen as listen_api  # noqa: E402
 from app.api import settings as settings_api  # noqa: E402
 from app.api import tasks as tasks_api  # noqa: E402
 from app.api import ws as ws_api  # noqa: E402
 
 app.include_router(accounts_api.router)
 app.include_router(auth_api.router)
+app.include_router(debug_api.router)
 app.include_router(login_api.router)
-app.include_router(listen_api.router)
 app.include_router(tasks_api.router)
 app.include_router(settings_api.router)
 app.include_router(ws_api.router)

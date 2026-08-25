@@ -24,10 +24,23 @@
 | `tag` | 触发条件 |
 | --- | --- |
 | `login_flow_error` | `do_login_with_phone`（点协议、输账号、点登录等）抛错 |
+| `password_login_error` | 服务端明确返回账号或密码错误 |
 | `network_risk_slider` | 滑块阶段出现「您当前的网络环境存在安全风险」 |
 | `slider_exception` | `solve_slider` 捕获到非风控类异常 |
 | `network_risk` | 登录重试结束后检测到网络环境安全风险 |
 | `no_login_cookie` | 轮询结束仍未获得 `MUSIC_U` / `__csrf` 等登录态 Cookie |
+
+## 在线查看截图
+
+登录管理端后，可通过受保护的接口在线查看截图（无需登录服务器翻目录）：
+
+```
+GET /api/debug/screenshots/{账号ID}/{截图文件名}
+```
+
+- 仅允许读取对应账号目录下的 `.png` 文件，文件名做路径包含校验，不能越目录访问。
+- 响应带 `Cache-Control: private, no-store`，截图不会被浏览器缓存。
+
 
 ## 日志关键字（配合截图排查）
 

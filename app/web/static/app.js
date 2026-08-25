@@ -133,51 +133,117 @@ function handleEvent(msg) {
 
 // ---------- 账号列表 ----------
 let globalSendTime = "09:30";
+// 本地互助配额（用于卡片上的帮听进度展示）
+let localListenDailyMax = "25";
+let localListenMonthlyMax = "650";
 
 async function loadAccounts() {
   const accounts = await api("/api/accounts");
   const body = $("#acc-body");
   body.innerHTML = "";
   $("#empty-hint").classList.toggle("hidden", accounts.length > 0);
+  const limitText = (v) => (parseInt(v, 10) > 0 ? parseInt(v, 10) : "不限");
   for (const a of accounts) {
     const status = a.cookie_status || "unknown";
     const statusText =
       { ok: "有效", expired: "过期", unknown: "未知" }[status] || status;
-    const runTime = a.run_time
-      ? escapeHtml(a.run_time)
-      : `${escapeHtml(globalSendTime)} <span class="tag-global">全局</span>`;
     const running = runningAccountId === a.id;
-   const actionBtn = running
-     ? `<button class="btn btn-sm btn-view" data-act="view" data-id="${a.id}" data-phone="${escapeHtml(a.phone)}">查看</button>`
-      : `<button class="btn btn-sm" data-act="run" data-id="${a.id}" data-phone="${escapeHtml(a.phone)}" data-role="${a.account_role || "musician"}">执行</button>`;
     const enabled = !!a.enabled;
-    let enabledBadge = enabled
-     ? `<span class="badge ok">启用</span>`
-     : `<span class="badge expired">暂停</span>`;
-    if (a.local_listen_enabled) {
-      enabledBadge += ` <span class="badge unknown">本地互助 帮${a.local_listen_helped_today || 0}/被${a.local_listen_received_today || 0}</span>`;
-    }
-   const toggleBtn = `<button class="btn btn-sm" data-act="toggle" data-id="${a.id}" data-enabled="${enabled ? 1 : 0}">${enabled ? "暂停" : "启用"}</button>`;
-    const listenConfigBtn = a.account_role === "player"
-      ? ""
-      : `<button class="btn btn-sm" data-act="listen-join" data-id="${a.id}" data-phone="${escapeHtml(a.phone)}">听歌配置</button>`;
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td data-label="手机号">${escapeHtml(a.phone)}</td>
-      <td data-label="昵称">${escapeHtml(a.nickname || "-")}</td>
-      <td data-label="Cookie 状态"><span class="badge ${status}">${statusText}</span></td>
-      <td data-label="状态">${enabledBadge}</td>
-      <td data-label="运行时间">${runTime}</td>
-      <td data-label="本月发布">${a.monthly_sends || 0}</td>
-      <td data-label="操作" class="cell-actions">
+    const useGlobal = !a.run_time;
+    const runTime = useGlobal ? globalSendTime : a.run_time;
+    const actionBtn = running
+      ? `<button class="btn btn-sm btn-view" data-act="view" data-id="${a.id}" data-phone="${escapeHtml(a.phone)}">查看</button>`
+      : `<button class="btn btn-sm" data-act="run" data-id="${a.id}" data-phone="${escapeHtml(a.phone)}" data-role="${a.account_role || "musician"}">执行</button>`;
+    const toggleBtn = `<button class="btn btn-sm" data-act="toggle" data-id="${a.id}" data-enabled="${enabled ? 1 : 0}">${enabled ? "暂停" : "启用"}</button>`;
+    const chips = [
+      `<span class="badge ${status}">Cookie ${statusText}</span>`,
+      `<span class="badge ${enabled ? "ok" : "unknown"}">${enabled ? "已启用" : "已暂停"}</span>`,
+      running ? `<span class="badge running">运行中</span>` : "",
+    ].join("");
+    const roleTag = `<span class="tag-role ${a.account_role === "player" ? "tag-player" : "tag-musician"}">${a.account_role === "player" ? "播放账号" : "音乐人"}</span>`;
+    const avatarText = (a.nickname || a.phone || "?").trim().charAt(0).toUpperCase() || "♪";
+    const lastLogin = a.last_login_at ? a.last_login_at.slice(5, 16) : "-";
+    // 音乐人：同步得到的平台进度（本月被听/发布任务）；播放账号的「同步」按钮不显示
+    const isMusician = (a.account_role || "musician") === "musician";
+    const syncBtn = isMusician
+      ? `<button class="btn btn-sm" data-act="sync" data-id="${a.id}" data-phone="${escapeHtml(a.phone)}">同步</button>`
+      : "";
+    const monthPlayedMeta = isMusician && a.musician_play_progress
+      ? `
+        <div class="meta-item">
+          <span class="meta-label">本月被听</span>
+          <span class="meta-value">${escapeHtml(a.musician_play_progress)}</span>
+        </div>`
+      : "";
+    const publishTaskMeta = isMusician && a.musician_publish_progress
+      ? `
+        <div class="meta-item">
+          <span class="meta-label">发布任务</span>
+          <span class="meta-value">${escapeHtml(a.musician_publish_progress)}</span>
+        </div>`
+      : "";
+    // 参与本地互助的账号展示帮听进度；被听进度只在音乐人卡片显示（平台同步值）
+    const inLocalListen = !!a.local_listen_enabled;
+    const helpedMeta = inLocalListen
+      ? `
+        <div class="meta-item">
+          <span class="meta-label">今日帮听</span>
+          <span class="meta-value">${a.local_listen_helped_today || 0}/${limitText(localListenDailyMax)}</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">本月帮听</span>
+          <span class="meta-value">${a.local_listen_helped_month || 0}/${limitText(localListenMonthlyMax)}</span>
+        </div>`
+      : "";
+    const card = document.createElement("div");
+    card.className = `acc-card${running ? " running" : ""}${enabled ? "" : " disabled"}`;
+    card.innerHTML = `
+      <div class="acc-top">
+        <div class="acc-id">
+          <div class="acc-avatar">${escapeHtml(avatarText)}</div>
+          <div class="acc-info">
+            <div class="acc-name">${escapeHtml(a.nickname || a.phone)}${roleTag}</div>
+            <div class="acc-sub">${escapeHtml(a.phone)}</div>
+          </div>
+        </div>
+        <div class="acc-chips">${chips}</div>
+      </div>
+      <div class="acc-meta">
+        <div class="meta-item">
+          <span class="meta-label">运行时间</span>
+          <span class="meta-value">${escapeHtml(runTime)}${useGlobal ? '<span class="tag-global">全局</span>' : ""}</span>
+        </div>${
+          isMusician
+            ? `${
+                // 已有平台同步的「发布任务」时隐藏本地计数「本月发布」
+                a.musician_publish_progress
+                  ? ""
+                  : `
+        <div class="meta-item">
+          <span class="meta-label">本月发布</span>
+          <span class="meta-value">${a.monthly_sends || 0}</span>
+        </div>`
+              }${monthPlayedMeta}${publishTaskMeta}
+        <div class="meta-item">
+          <span class="meta-label">上次登录</span>
+          <span class="meta-value">${escapeHtml(lastLogin)}</span>
+        </div>${helpedMeta}`
+            : `${helpedMeta}
+        <div class="meta-item">
+          <span class="meta-label">上次登录</span>
+          <span class="meta-value">${escapeHtml(lastLogin)}</span>
+        </div>`
+        }
+      </div>
+      <div class="acc-actions">
         <button class="btn btn-sm btn-primary" data-act="login" data-id="${a.id}" data-phone="${escapeHtml(a.phone)}">登录</button>
-        ${listenConfigBtn}
+        ${syncBtn}
         ${actionBtn}
         ${toggleBtn}
         <button class="btn btn-sm" data-act="edit" data-id="${a.id}">编辑</button>
         <button class="btn btn-sm btn-danger" data-act="delete" data-id="${a.id}" data-phone="${escapeHtml(a.phone)}">删除</button>
-      </td>`;
-    body.appendChild(tr);
+      </div>`;
+    body.appendChild(card);
   }
 }
 
@@ -185,6 +251,8 @@ async function refreshGlobalSendTime() {
   try {
     const s = await api("/api/settings");
     if (s.default_send_time) globalSendTime = s.default_send_time;
+    if (s.local_listen_daily_max) localListenDailyMax = s.local_listen_daily_max;
+    if (s.local_listen_monthly_max) localListenMonthlyMax = s.local_listen_monthly_max;
   } catch (e) {
     /* ignore */
   }
@@ -208,8 +276,11 @@ $("#acc-body").addEventListener("click", async (e) => {
   try {
     if (act === "login") {
       openLoginConfirm(id, btn.dataset.phone);
-    } else if (act === "listen-join") {
-      openListenJoin(id, btn.dataset.phone);
+    } else if (act === "sync") {
+      openRunModal(`账号 ${btn.dataset.phone || id} 同步音乐人数据`, id);
+      runningAccountId = Number(id);
+      loadAccounts();
+      await api(`/api/tasks/${id}/sync-musician`, { method: "POST" });
     } else if (act === "run") {
       openRunSelect(id, btn.dataset.phone, btn.dataset.role);
     } else if (act === "toggle") {
@@ -229,89 +300,6 @@ $("#acc-body").addEventListener("click", async (e) => {
   } catch (err) {
     appendLog("", "操作失败：" + err.message, "error");
     alert("操作失败：" + err.message);
-  }
-});
-
-// ---------- 听歌概览 ----------
-async function openListenJoin(id, phone) {
-  $("#listen-account-id").value = id;
-  $("#listen-phone").textContent = phone || `#${id}`;
-  $("#listen-status").textContent = "读取中...";
-  $("#listen-status").className = "badge";
-  $("#listen-today-progress").textContent = "-";
-  $("#listen-month-progress").textContent = "-";
-  $("#listen-today-received-progress").textContent = "-";
-  $("#listen-month-received-progress").textContent = "-";
-  $("#listen-error").textContent = "";
-  $("#modal-listen-join").classList.remove("hidden");
-  try {
-    const data = await api(`/api/listen/status/${id}`);
-    const listen = data.listen || {};
-    const progress = data.progress || {};
-    const normal = listen.status === "normal";
-    $("#listen-status").textContent = normal ? "正常" : (listen.status === "error" ? "异常" : "未加入");
-    $("#listen-status").className = `badge ${normal ? "ok" : (listen.status === "error" ? "expired" : "unknown")}`;
-    const progressText = (count, limit) => `${count ?? 0}/${limit > 0 ? limit : "不限"}`;
-    $("#listen-today-progress").textContent = progressText(
-      progress.today_listen_count,
-      progress.daily_listen_limit,
-    );
-    $("#listen-month-progress").textContent = progressText(
-      progress.monthly_listen_count,
-      progress.monthly_listen_limit,
-    );
-    $("#listen-today-received-progress").textContent = progressText(
-      progress.today_listened_count,
-      progress.daily_listen_limit,
-    );
-    $("#listen-month-received-progress").textContent = progressText(
-      progress.monthly_listened_count,
-      progress.monthly_listen_limit,
-    );
-    $("#listen-error").textContent = listen.error || "";
-  } catch (err) {
-    $("#listen-status").textContent = "异常";
-    $("#listen-status").className = "badge expired";
-    $("#listen-error").textContent = err.message;
-  }
-}
-
-$("#btn-join-listen").addEventListener("click", async () => {
-  const account_id = Number($("#listen-account-id").value);
-  const settings = await api("/api/settings");
-  const api_url = settings.listen_api_url?.trim() || "";
-  const client_token = settings.listen_client_token?.trim() || "";
-  const raw_item_id = settings.listen_item_id?.trim() || "";
-  if (!api_url || !raw_item_id || !client_token) {
-    alert("请先在全局设置中填写听歌 API 地址、客户端 Token 和歌曲/专辑 ID");
-    return;
-  }
-  if (!confirm("公共互助会将此账号加入共享播放池，并把播放记录发送到配置的服务端。该服务可能带来账号风控风险，是否继续？")) {
-    return;
-  }
-  try {
-    await api("/api/listen/join", {
-      method: "POST",
-      body: JSON.stringify({ account_id, api_url, netease_item_id: raw_item_id }),
-    });
-    $("#modal-listen-join").classList.add("hidden");
-    await loadAccounts();
-    alert("已加入听歌");
-  } catch (err) {
-    alert("加入听歌失败：" + err.message);
-  }
-});
-
-$("#btn-leave-listen").addEventListener("click", async () => {
-  const account_id = Number($("#listen-account-id").value);
-  if (!confirm("确定退出当前账号的听歌互助吗？")) return;
-  try {
-    await api(`/api/listen/leave/${account_id}`, { method: "DELETE" });
-    $("#modal-listen-join").classList.add("hidden");
-    await loadAccounts();
-    alert("已退出听歌");
-  } catch (err) {
-    alert("退出听歌失败：" + err.message);
   }
 });
 
@@ -413,9 +401,16 @@ function refreshAddLoginFields() {
 $("#in-login-method").addEventListener("change", refreshAddLoginFields);
 function refreshAddLocalFields() {
   const player = $("#in-account-role").value === "player";
-  $("#in-local-listen-enabled").disabled = player;
-  $("#in-local-listen-item").disabled = player;
-  if (player) $("#in-local-listen-enabled").checked = true;
+  const musicianFields = $("#in-musician-listen-fields");
+  const playerFields = $("#in-player-listen-fields");
+  musicianFields.classList.toggle("hidden", player);
+  playerFields.classList.toggle("hidden", !player);
+  musicianFields.hidden = player;
+  playerFields.hidden = !player;
+  musicianFields.style.display = player ? "none" : "";
+  playerFields.style.display = player ? "" : "none";
+  $("#in-player-listen-enabled").checked = player;
+  $("#in-local-listen-enabled").checked = !player;
 }
 $("#in-account-role").addEventListener("change", refreshAddLocalFields);
 
@@ -427,6 +422,7 @@ $("#btn-add").addEventListener("click", () => {
   $("#in-account-role").value = "musician";
   $("#in-local-listen-enabled").checked = false;
   $("#in-local-listen-item").value = "";
+  $("#in-player-listen-enabled").checked = true;
   refreshAddLoginFields();
   refreshAddLocalFields();
   $("#modal-add").classList.remove("hidden");
@@ -437,8 +433,12 @@ $("#btn-save-add").addEventListener("click", async () => {
   const login_method = $("#in-login-method").value;
   const run_time = $("#in-runtime").value.trim() || null;
   const account_role = $("#in-account-role").value;
-  const local_listen_enabled = $("#in-local-listen-enabled").checked;
-  const local_listen_item_id = $("#in-local-listen-item").value.trim();
+  const local_listen_enabled = account_role === "player"
+    ? $("#in-player-listen-enabled").checked
+    : $("#in-local-listen-enabled").checked;
+  const local_listen_item_id = account_role === "player"
+    ? ""
+    : $("#in-local-listen-item").value.trim();
   if (!phone) {
     alert("请填写手机号");
     return;
@@ -476,14 +476,22 @@ async function openEdit(id) {
   $("#edit-account-role").value = a.account_role || "musician";
   $("#edit-local-listen-enabled").checked = !!a.local_listen_enabled;
   $("#edit-local-listen-item").value = a.local_listen_item_id || "";
+  $("#edit-player-listen-enabled").checked = !!a.local_listen_enabled;
   refreshEditLocalFields();
   $("#modal-edit").classList.remove("hidden");
 }
 function refreshEditLocalFields() {
   const player = $("#edit-account-role").value === "player";
-  $("#edit-local-listen-enabled").disabled = player;
-  $("#edit-local-listen-item").disabled = player;
-  if (player) $("#edit-local-listen-enabled").checked = true;
+  const musicianFields = $("#edit-musician-listen-fields");
+  const playerFields = $("#edit-player-listen-fields");
+  musicianFields.classList.toggle("hidden", player);
+  playerFields.classList.toggle("hidden", !player);
+  musicianFields.hidden = player;
+  playerFields.hidden = !player;
+  musicianFields.style.display = player ? "none" : "";
+  playerFields.style.display = player ? "" : "none";
+  $("#edit-player-listen-enabled").checked = player;
+  $("#edit-local-listen-enabled").checked = !player;
 }
 $("#edit-account-role").addEventListener("change", refreshEditLocalFields);
 $("#btn-save-edit").addEventListener("click", async () => {
@@ -497,8 +505,13 @@ $("#btn-save-edit").addEventListener("click", async () => {
   if (iv) payload.interval_days = parseInt(iv, 10);
   payload.enabled = $("#edit-enabled").checked;
   payload.account_role = $("#edit-account-role").value;
-  payload.local_listen_enabled = $("#edit-local-listen-enabled").checked;
-  payload.local_listen_item_id = $("#edit-local-listen-item").value.trim();
+  const editRole = $("#edit-account-role").value;
+  payload.local_listen_enabled = editRole === "player"
+    ? $("#edit-player-listen-enabled").checked
+    : $("#edit-local-listen-enabled").checked;
+  payload.local_listen_item_id = editRole === "player"
+    ? ""
+    : $("#edit-local-listen-item").value.trim();
   try {
     await api(`/api/accounts/${id}`, {
       method: "PATCH",
@@ -527,23 +540,10 @@ $("#btn-settings").addEventListener("click", async () => {
   $("#set-interval").value = s.execution_interval_days || "";
   $("#set-max-sends").value = s.max_monthly_sends || "";
   $("#set-headless").checked = s.headless === "1";
-  $("#set-listen-daily-max").value = s.listen_daily_max || "1";
-  $("#set-listen-monthly-max").value = s.listen_monthly_max || "30";
-  $("#set-listen-start-time").value = s.listen_start_time || s.default_send_time || "09:30";
-  $("#set-listen-api-url").value = s.listen_api_url || "";
-  $("#set-listen-client-token").value = s.listen_client_token || "";
   $("#set-local-listen-daily-max").value = s.local_listen_daily_max || "25";
   $("#set-local-listen-monthly-max").value = s.local_listen_monthly_max || "650";
   $("#set-local-listen-percent").value = s.local_listen_play_percent || "34";
   $("#set-local-listen-start-time").value = s.local_listen_start_time || "10:00";
-  const listenItem = s.listen_item_id || "";
-  if (listenItem.startsWith("album:")) {
-    $("#set-listen-item-type").value = "album";
-    $("#set-listen-item-id").value = listenItem.slice(6);
-  } else {
-    $("#set-listen-item-type").value = "song";
-    $("#set-listen-item-id").value = listenItem;
-  }
   $("#set-notification-method").value = s.notification_method || "none";
   $("#set-wecom").value = s.wecom_webhook_key || "";
   $("#set-webhook-url").value = s.custom_webhook_url || "";
@@ -564,18 +564,10 @@ $("#btn-save-settings").addEventListener("click", async () => {
     execution_interval_days: $("#set-interval").value.trim(),
     max_monthly_sends: $("#set-max-sends").value.trim(),
     headless: $("#set-headless").checked ? "1" : "0",
-    listen_daily_max: $("#set-listen-daily-max").value.trim() || "0",
-    listen_monthly_max: $("#set-listen-monthly-max").value.trim() || "0",
-    listen_start_time: $("#set-listen-start-time").value.trim() || "09:30",
-    listen_api_url: $("#set-listen-api-url").value.trim(),
-    listen_client_token: $("#set-listen-client-token").value.trim(),
     local_listen_daily_max: $("#set-local-listen-daily-max").value.trim() || "0",
     local_listen_monthly_max: $("#set-local-listen-monthly-max").value.trim() || "0",
     local_listen_play_percent: $("#set-local-listen-percent").value.trim() || "34",
     local_listen_start_time: $("#set-local-listen-start-time").value.trim() || "10:00",
-    listen_item_id: $("#set-listen-item-type").value === "album"
-      ? `album:${$("#set-listen-item-id").value.trim()}`
-      : $("#set-listen-item-id").value.trim(),
     notification_method: $("#set-notification-method").value,
     wecom_webhook_key: $("#set-wecom").value.trim(),
     custom_webhook_url: $("#set-webhook-url").value.trim(),
@@ -601,13 +593,9 @@ $("#btn-save-settings").addEventListener("click", async () => {
       method: "PUT",
       body: JSON.stringify({ values }),
     });
-    const syncResult = await api("/api/listen/sync", { method: "POST" });
     $("#modal-settings").classList.add("hidden");
     await refreshGlobalSendTime();
     await loadAccounts();
-    if (syncResult.failed?.length) {
-      alert(`全局配置已保存，但有 ${syncResult.failed.length} 个账号同步失败`);
-    }
   } catch (err) {
     alert("保存失败：" + err.message);
   }

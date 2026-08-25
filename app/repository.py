@@ -102,6 +102,7 @@ def update_account(account_id: int, **fields) -> None:
         "listen_api_url", "listen_item_id", "listen_status", "listen_error",
         "listen_play_count", "listen_received_count", "listen_last_at",
         "account_role", "local_listen_enabled", "local_listen_item_id",
+        "musician_play_progress", "musician_publish_progress",
     }
     sets, vals = [], []
     for k, v in fields.items():
@@ -223,6 +224,46 @@ def add_local_listen_run(
             "INSERT INTO local_listen_runs(listener_account_id,target_account_id,target_item_id,status,message) VALUES (?,?,?,?,?)",
             (listener_account_id, target_account_id, target_item_id, status, message[:2000]),
         )
+
+
+# ---------- 音乐人任务快照（同步数据） ----------
+def save_musician_snapshot(account_id: int, tasks: list[dict]) -> None:
+    import json
+
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO musician_task_snapshots(account_id, payload, synced_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(account_id) DO UPDATE SET payload=excluded.payload, synced_at=excluded.synced_at",
+            (account_id, json.dumps(tasks, ensure_ascii=False), datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+
+
+def get_musician_snapshot(account_id: int) -> Optional[dict]:
+    import json
+
+    with db() as conn:
+        row = conn.execute(
+            "SELECT payload, synced_at FROM musician_task_snapshots WHERE account_id=?",
+            (account_id,),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        tasks = json.loads(row["payload"])
+    except ValueError:
+        tasks = []
+    return {"synced_at": row["synced_at"], "tasks": tasks if isinstance(tasks, list) else []}
+
+
+def musician_progress_headline(tasks: list[dict], keywords: tuple[str, ...]) -> str:
+    """从同步到的任务里挑出第一个匹配关键词且有进度的任务。"""
+    for task in tasks or []:
+        title = str(task.get("title") or "")
+        if any(k in title for k in keywords):
+            progress = str(task.get("progress") or "").strip()
+            if progress:
+                return progress
+    return ""
 
 
 def list_logs(account_id: Optional[int] = None, limit: int = 100) -> list[dict[str, Any]]:

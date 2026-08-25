@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     account_role        TEXT NOT NULL DEFAULT 'musician',
     local_listen_enabled INTEGER NOT NULL DEFAULT 0,
     local_listen_item_id TEXT,
+    musician_play_progress    TEXT,   -- 音乐人任务同步：被听进度（如 23/650）
+    musician_publish_progress TEXT,   -- 音乐人任务同步：发布任务进度（如 4/4）
     created_at          TEXT DEFAULT (datetime('now','localtime')),
     updated_at          TEXT DEFAULT (datetime('now','localtime'))
 );
@@ -71,6 +73,12 @@ CREATE INDEX IF NOT EXISTS idx_local_listen_runs_listener
     ON local_listen_runs(listener_account_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_local_listen_runs_target
     ON local_listen_runs(target_account_id, created_at);
+
+CREATE TABLE IF NOT EXISTS musician_task_snapshots (
+    account_id INTEGER PRIMARY KEY,
+    payload    TEXT NOT NULL,
+    synced_at  TEXT NOT NULL
+);
 """
 
 
@@ -110,6 +118,8 @@ def init_db() -> None:
             "account_role": "TEXT NOT NULL DEFAULT 'musician'",
             "local_listen_enabled": "INTEGER NOT NULL DEFAULT 0",
             "local_listen_item_id": "TEXT",
+            "musician_play_progress": "TEXT",
+            "musician_publish_progress": "TEXT",
         }
         for name, definition in listen_columns.items():
             if name not in account_columns:

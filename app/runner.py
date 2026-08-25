@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import time
-import requests
 from datetime import datetime
 from typing import Optional
 
@@ -42,6 +41,21 @@ def _record_auth_state(account_id: int, result: dict) -> bool:
     return True
 
 
+def _notify_auto_login_failure(account_id: int, account: dict, result: dict) -> None:
+    """定时任务自动恢复登录失败时通知；二维码提醒仍由登录模块负责。"""
+    account_name = account_label(account_id, account=account)
+    message = result.get("message") or "未知原因"
+    try:
+        send_configured_notification(
+            f"账号：{account_name}\n自动登录未完成：{message}\n请打开管理页面查看日志并重新登录。",
+            title="网易音乐人自动登录失败",
+            event="auto_login_failed",
+            extra={"account": account_name, "message": message},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"自动登录失败通知发送异常：{exc}")
+
+
 # ---------- 登录 ----------
 def run_login(account_id: int) -> dict:
     acc = repo.get_account(account_id)
@@ -75,6 +89,49 @@ def run_login(account_id: int) -> dict:
     return res
 
 
+# ---------- 同步音乐人任务进度 ----------
+def run_sync_musician_tasks(account_id: int) -> dict:
+    """读取音乐人后台任务列表（发布/播放等），快照入库并在日志中展示。"""
+    acc = repo.get_account(account_id)
+    if not acc:
+        return {"ok": False, "message": "account not found"}
+    if acc.get("account_role", "musician") != "musician":
+        return {"ok": False, "message": "普通播放账号没有音乐人任务"}
+
+    from app.browser.tasks import do_sync_musician_tasks
+
+    repo.add_log(account_id, "sync", "info", "开始同步音乐人任务进度")
+    try:
+        res = _run_blocking(do_sync_musician_tasks, acc["profile_dir"], account_id)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("同步音乐人任务异常")
+        repo.add_log(account_id, "sync", "fail", str(e))
+        return {"ok": False, "message": str(e)}
+
+    _record_auth_state(account_id, res)
+    if res.get("ok"):
+        tasks = res.get("tasks") or []
+        repo.save_musician_snapshot(account_id, tasks)
+        # 进度写进账号表，前端列表直接读列，不必每次重算快照
+        # （注意：播放任务标题「发布歌曲有效播放」同含「发布」，发布类必须
+        #   用「图文笔记/发布动态」这类更具体的词匹配，避免互相误配。）
+        play_progress = repo.musician_progress_headline(tasks, ("有效播放", "播放", "听歌"))
+        publish_progress = repo.musician_progress_headline(
+            tasks, ("图文笔记", "发布动态", "发布笔记")
+        )
+        repo.update_account(
+            account_id,
+            musician_play_progress=play_progress,
+            musician_publish_progress=publish_progress,
+        )
+        if play_progress:
+            _emit_run(account_id, f"被听进度：{play_progress}")
+        if publish_progress:
+            _emit_run(account_id, f"发布任务进度：{publish_progress}")
+    repo.add_log(account_id, "sync", "success" if res.get("ok") else "fail", res.get("message", ""))
+    return res
+
+
 # ---------- 每日签到 ----------
 def run_checkin(account_id: int) -> dict:
     acc = repo.get_account(account_id)
@@ -97,115 +154,6 @@ def run_checkin(account_id: int) -> dict:
     repo.add_log(account_id, "musician_checkin", "success" if musician.get("ok") else "info", musician.get("message", ""))
     repo.add_log(account_id, "daily_checkin", "success" if daily.get("ok") else "fail", daily.get("message", ""))
     return res
-
-
-def run_listen(account_id: int) -> dict:
-    acc = repo.get_account(account_id)
-    if not acc:
-        return {"ok": False, "message": "account not found"}
-    api_url = (repo.get_setting("listen_api_url", "") or acc.get("listen_api_url") or "").strip()
-    if not api_url:
-        return {"ok": False, "message": "未配置听歌 API 地址，请先点击「加入听歌」"}
-
-    from app.api.listen import _account_md5, _client_headers, _server_url
-    from app.browser.tasks import do_listen_music
-
-    account_md5 = _account_md5(acc["phone"])
-    headers = _client_headers(account_md5)
-    try:
-        next_resp = requests.get(
-            _server_url(api_url, "/api/next"),
-            headers=headers,
-            timeout=10,
-        )
-        if next_resp.status_code == 404:
-            return {"ok": False, "message": "听歌服务暂无可播放任务"}
-        if not 200 <= next_resp.status_code < 300:
-            return {"ok": False, "message": f"获取听歌任务失败：HTTP {next_resp.status_code}"}
-        next_data = next_resp.json() or {}
-        target = str(next_data.get("netease_item_id") or "").strip()
-        task_id = str(next_data.get("task_id") or "").strip()
-        play_token = str(next_data.get("play_token") or "").strip()
-        if not target or not task_id or not play_token:
-            return {"ok": False, "message": "听歌服务未返回完整任务凭证"}
-
-        repo.add_log(account_id, "listen", "info", f"开始播放歌曲：{target}")
-        result = _run_blocking(do_listen_music, acc["profile_dir"], target, account_id)
-        if not result.get("ok"):
-            repo.update_account(
-                account_id,
-                listen_status="error",
-                listen_error=result.get("message", "播放失败"),
-            )
-            repo.add_log(account_id, "listen", "fail", result.get("message", "播放失败"))
-            return result
-
-        finish_resp = requests.post(
-            _server_url(api_url, "/api/play/finish"),
-            json={
-                "account_md5": account_md5,
-                "netease_item_id": target,
-                "task_id": task_id,
-                "play_token": play_token,
-            },
-            headers=headers,
-            timeout=10,
-        )
-        if not 200 <= finish_resp.status_code < 300:
-            message = f"提交听歌结果失败：HTTP {finish_resp.status_code}"
-            repo.add_log(account_id, "listen", "fail", message)
-            repo.update_account(account_id, listen_status="error", listen_error=message)
-            return {"ok": False, "message": message}
-        repo.update_account(
-            account_id,
-            listen_status="normal",
-            listen_error="",
-            listen_play_count=(acc.get("listen_play_count") or 0) + 1,
-            listen_last_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        )
-        repo.add_log(account_id, "listen", "success", f"听歌完成：{target}")
-        return {"ok": True, "message": f"听歌完成：{target}"}
-    except requests.RequestException as exc:
-        message = f"连接听歌 API 失败：{exc}"
-        repo.update_account(account_id, listen_status="error", listen_error=message)
-        repo.add_log(account_id, "listen", "fail", message)
-        return {"ok": False, "message": message}
-
-def run_auto_listen_for_account(account_id: int) -> None:
-    """在全局听歌开始时间执行已加入账号的每日听歌任务。"""
-    acc = repo.get_account(account_id)
-    if (
-        not acc
-        or not acc["enabled"]
-        or acc.get("account_role", "musician") != "musician"
-        or acc.get("listen_status") != "normal"
-    ):
-        return
-    if not (repo.get_setting("listen_api_url", "") or "").strip():
-        return
-    if not (repo.get_setting("listen_item_id", "") or "").strip():
-        return
-
-    daily_max = max(0, repo.get_setting_int("listen_daily_max", 1))
-    monthly_max = max(0, repo.get_setting_int("listen_monthly_max", 30))
-    today_count = repo.count_success_logs_today(account_id, "listen")
-    month_count = repo.count_success_logs_this_month(account_id, "listen")
-    completed = 0
-    while (
-        today_count + completed < daily_max
-        and month_count + completed < monthly_max
-    ):
-        result = run_listen(account_id)
-        if not result.get("ok"):
-            break
-        completed += 1
-    if completed:
-        _emit_run(
-            account_id,
-            f"自动听歌完成：{completed} 首"
-            f"（今日 {today_count + completed}/{daily_max}，"
-            f"本月 {month_count + completed}/{monthly_max}）",
-        )
 
 
 # ---------- 本地账号互助听歌 ----------
@@ -240,19 +188,8 @@ def run_local_listen_batch(account_id: int, max_count: int) -> dict:
         return {"ok": False, "message": "暂无其他已加入本地互助的账号"}
     from app.browser.tasks import do_local_listen_music_batch
 
-    try:
-        result = _run_blocking(
-            do_local_listen_music_batch,
-            acc["profile_dir"],
-            [job["item_id"] for job in jobs],
-            account_id,
-            repo.get_setting_int("local_listen_play_percent", 34),
-        )
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "message": str(exc)}
-    results = list(result.get("results") or [])
-    completed = 0
-    for index, item_result in enumerate(results[: len(jobs)]):
+    def _record_result(index: int, item_result: dict) -> None:
+        """每播完一首立即落库并推送状态，前端帮听数字随播随涨。"""
         job = jobs[index]
         ok = bool(item_result.get("ok"))
         message = (
@@ -261,7 +198,21 @@ def run_local_listen_batch(account_id: int, max_count: int) -> dict:
         )
         repo.add_local_listen_run(account_id, int(job["target"]["id"]), job["item_id"], "success" if ok else "fail", message)
         repo.add_log(account_id, "local_listen", "success" if ok else "fail", message)
-        completed += int(ok)
+        bus.status(account_id, "running", f"本地互助进度 {index + 1}/{len(jobs)}")
+
+    try:
+        result = _run_blocking(
+            do_local_listen_music_batch,
+            acc["profile_dir"],
+            [job["item_id"] for job in jobs],
+            account_id,
+            repo.get_setting_int("local_listen_play_percent", 34),
+            on_result=_record_result,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": str(exc)}
+    results = list(result.get("results") or [])
+    completed = sum(1 for item_result in results[: len(jobs)] if item_result.get("ok"))
     return {**result, "ok": completed == len(jobs), "completed": completed, "requested": len(jobs), "message": f"完成 {completed}/{len(jobs)} 首"}
 
 
@@ -371,7 +322,7 @@ def _emit_run(account_id: int, line: str) -> None:
 
 def _notify_manual_result(account_id: int, acc: dict, tasks: list[str], lines: list[str], *, ok: bool) -> None:
     """发送网页手动执行结果；通知失败不影响任务本身。"""
-    task_names = {"checkin": "签到", "publish": "发布动态", "vip": "领取 VIP", "listen": "公共互助听歌", "local_listen": "本地互助听歌"}
+    task_names = {"checkin": "签到", "publish": "发布动态", "vip": "领取 VIP", "local_listen": "本地互助听歌"}
     selected = "、".join(task_names[t] for t in tasks if t in task_names)
     account_name = account_label(account_id, account=acc)
     content = "\n".join([
@@ -396,7 +347,7 @@ def _notify_manual_result(account_id: int, acc: dict, tasks: list[str], lines: l
 def run_selected(account_id: int, tasks: list[str]) -> None:
     """
     手动执行选中的任务，全部在**同一浏览器会话**内完成（签到主标签页、间隔任务新标签页）。
-    tasks 取值：'checkin'、'publish'、'vip'、'listen'、'local_listen'。
+    tasks 取值：'checkin'、'publish'、'vip'、'local_listen'。
     发布与 VIP 互斥，若同时勾选以 VIP 优先（同一次只做一种间隔任务）。
     """
     acc = repo.get_account(account_id)
@@ -408,7 +359,6 @@ def run_selected(account_id: int, tasks: list[str]) -> None:
     want_checkin = "checkin" in tasks
     want_vip = "vip" in tasks
     want_publish = "publish" in tasks
-    want_listen = "listen" in tasks
     want_local_listen = "local_listen" in tasks
     run_interval = want_vip or want_publish
     interval_kind = "vip" if want_vip else "publish"
@@ -488,12 +438,6 @@ def run_selected(account_id: int, tasks: list[str]) -> None:
         all_ok = False
         result_lines.append(f"{'VIP 领取' if interval_kind == 'vip' else '发布动态'}：未返回执行结果")
 
-    if want_listen:
-        listen_result = run_listen(account_id)
-        listen_ok = bool(listen_result.get("ok"))
-        all_ok = all_ok and listen_ok
-        result_lines.append(f"听歌：{listen_result.get('message', '未完成')}")
-
     if want_local_listen:
         local_result = run_local_listen_to_limit(account_id)
         local_ok = bool(local_result.get("ok"))
@@ -520,23 +464,55 @@ def run_daily_for_account(account_id: int) -> None:
                           f"（{'执行' if decision['run'] else '跳过'}）")
 
     publish_msg = f"{datetime.now().strftime('%Y年%m月%d日 %H:%M')} 分享音乐"
-    try:
-        res = _run_blocking(
+
+    def _execute_daily(current_account: dict) -> dict:
+        return _run_blocking(
             do_daily_run,
-            acc["profile_dir"],
+            current_account["profile_dir"],
             account_id,
             run_checkin=True,
             run_interval=decision["run"],
             interval_kind=decision["kind"],
             publish_msg=publish_msg,
         )
+
+    try:
+        res = _execute_daily(acc)
     except Exception as e:  # noqa: BLE001
         logger.exception("每日任务异常")
         repo.add_log(account_id, "daily", "fail", str(e))
         return
 
     if not _record_auth_state(account_id, res):
-        return
+        _emit_run(account_id, "每日任务检测到登录态失效，自动发起登录流程")
+        repo.add_log(account_id, "login", "info", "每日任务触发自动重新登录")
+        login_result = run_login(account_id)
+        if not login_result.get("ok"):
+            _emit_run(
+                account_id,
+                f"自动登录未完成：{login_result.get('message', '未知原因')}；本次每日任务停止",
+            )
+            _notify_auto_login_failure(account_id, acc, login_result)
+            return
+
+        _emit_run(account_id, "自动登录成功，重新执行本次每日任务")
+        refreshed = repo.get_account(account_id)
+        if not refreshed:
+            return
+        try:
+            res = _execute_daily(refreshed)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("自动登录后的每日任务重试异常")
+            repo.add_log(account_id, "daily", "fail", f"自动登录后重试失败：{e}")
+            return
+        if not _record_auth_state(account_id, res):
+            _emit_run(account_id, "自动登录后仍未通过登录态校验，本次每日任务停止")
+            _notify_auto_login_failure(
+                account_id,
+                refreshed,
+                {"message": "自动登录后仍未通过服务端登录态校验"},
+            )
+            return
 
     # 分别记录音乐人签到和日常签到结果
     checkin = res.get("checkin") or {}

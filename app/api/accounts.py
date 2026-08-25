@@ -45,6 +45,14 @@ def _safe(acc: dict) -> dict:
     account_id = int(out["id"])
     out["local_listen_helped_today"] = repo.count_local_listen_successes(account_id, period="today")
     out["local_listen_received_today"] = repo.count_local_listen_successes(account_id, period="today", as_target=True)
+    out["local_listen_helped_month"] = repo.count_local_listen_successes(account_id, period="month")
+    out["local_listen_received_month"] = repo.count_local_listen_successes(account_id, period="month", as_target=True)
+    if out.get("account_role", "musician") == "musician":
+        # 进度由「同步」写入账号列；synced_at 仍取快照表
+        out["musician_play_progress"] = out.get("musician_play_progress") or ""
+        out["musician_publish_progress"] = out.get("musician_publish_progress") or ""
+        snapshot = repo.get_musician_snapshot(account_id)
+        out["musician_synced_at"] = (snapshot or {}).get("synced_at") or ""
     return out
 
 
@@ -82,7 +90,7 @@ def create_account(body: AccountCreate) -> dict:
     repo.update_account(
         account_id,
         account_role=body.account_role,
-        local_listen_enabled=1 if body.local_listen_enabled or body.account_role == "player" else 0,
+        local_listen_enabled=1 if body.local_listen_enabled else 0,
         local_listen_item_id="" if body.account_role == "player" else body.local_listen_item_id.strip(),
     )
     _reschedule()
@@ -97,7 +105,6 @@ def update_account(account_id: int, body: AccountUpdate) -> dict:
     if "account_role" in fields and fields["account_role"] not in {"musician", "player"}:
         raise HTTPException(422, "账号角色必须是 musician 或 player")
     if "account_role" in fields and fields["account_role"] == "player":
-        fields["local_listen_enabled"] = 1
         fields["local_listen_item_id"] = ""
     if fields.get("local_listen_item_id"):
         try:

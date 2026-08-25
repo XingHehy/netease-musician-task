@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>网易音乐人任务管理</title>
-    <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="/static/style.css?v=20260825-2" />
   </head>
   <body>
     <header class="topbar">
@@ -27,52 +27,11 @@
         </div>
       </div>
 
-      <div class="card">
-        <table class="tbl">
-          <thead>
-            <tr>
-              <th class="ta-c">手机号</th>
-              <th class="ta-c">昵称</th>
-              <th class="ta-c">Cookie 状态</th>
-              <th class="ta-c">状态</th>
-              <th class="ta-c">运行时间</th>
-              <th class="ta-c">本月发布</th>
-              <th class="ta-r">操作</th>
-            </tr>
-          </thead>
-          <tbody id="acc-body"></tbody>
-        </table>
-        <div id="empty-hint" class="empty hidden">
-          还没有账号，点右上角「新增账号」开始。
-        </div>
+      <div class="acc-list" id="acc-body"></div>
+      <div id="empty-hint" class="empty hidden">
+        还没有账号，点右上角「新增账号」开始。
       </div>
     </main>
-
-    <!-- 听歌配置弹窗 -->
-    <div id="modal-listen-join" class="modal hidden">
-      <div class="modal-card listen-modal-card">
-        <div class="modal-head">
-          <h3>听歌配置</h3>
-          <button class="x" data-close>&times;</button>
-        </div>
-        <input id="listen-account-id" type="hidden" />
-        <p class="confirm-text">账号：<b id="listen-phone"></b></p>
-        <div class="listen-status-grid">
-          <div>加入状态：<span id="listen-status" class="badge unknown">未加入</span></div>
-          <div>今日听歌任务：<b id="listen-today-progress">-</b></div>
-          <div>当月听歌任务：<b id="listen-month-progress">-</b></div>
-          <div>当日被听歌任务：<b id="listen-today-received-progress">-</b></div>
-          <div>当月被听歌任务：<b id="listen-month-received-progress">-</b></div>
-        </div>
-        <p id="listen-error" class="error-text"></p>
-        <p class="hint-text">听歌地址和歌曲配置请在“全局设置”中修改。</p>
-        <div class="modal-actions">
-          <button class="btn" data-close>取消</button>
-          <button class="btn btn-danger" id="btn-leave-listen">退出听歌</button>
-          <button class="btn btn-primary" id="btn-join-listen">加入听歌</button>
-        </div>
-      </div>
-    </div>
 
     <!-- 新增账号弹窗 -->
     <div id="modal-add" class="modal hidden">
@@ -102,10 +61,15 @@
             <option value="player">普通播放账号</option>
           </select>
         </label>
-        <label class="row"><input id="in-local-listen-enabled" type="checkbox" /> 加入本机账号互助</label>
-        <label>希望被播放的歌曲/专辑 ID
-          <textarea id="in-local-listen-item" rows="3" placeholder="音乐人账号可填写多个 ID；专辑用 album:ID"></textarea>
-        </label>
+        <div id="in-musician-listen-fields">
+          <label class="row"><input id="in-local-listen-enabled" type="checkbox" /> 加入被播放序列</label>
+          <label>希望被播放的歌曲/专辑 ID
+            <textarea id="in-local-listen-item" rows="3" placeholder="可填写多个 ID；专辑用 album:ID"></textarea>
+          </label>
+        </div>
+        <div id="in-player-listen-fields">
+          <label class="row"><input id="in-player-listen-enabled" type="checkbox" /> 加入听歌序列</label>
+        </div>
         <div class="modal-actions">
           <button class="btn" data-close>取消</button>
           <button class="btn btn-primary" id="btn-save-add">保存并登录</button>
@@ -139,10 +103,15 @@
             <option value="player">普通播放账号</option>
           </select>
         </label>
-        <label class="row"><input id="edit-local-listen-enabled" type="checkbox" /> 加入本机账号互助</label>
-        <label>希望被播放的歌曲/专辑 ID
-          <textarea id="edit-local-listen-item" rows="3" placeholder="多个 ID 用逗号、空格或换行分隔；专辑用 album:ID"></textarea>
-        </label>
+        <div id="edit-musician-listen-fields">
+          <label class="row"><input id="edit-local-listen-enabled" type="checkbox" /> 加入被播放序列</label>
+          <label>希望被播放的歌曲/专辑 ID
+            <textarea id="edit-local-listen-item" rows="3" placeholder="多个 ID 用逗号、空格或换行分隔；专辑用 album:ID"></textarea>
+          </label>
+        </div>
+        <div id="edit-player-listen-fields">
+          <label class="row"><input id="edit-player-listen-enabled" type="checkbox" /> 加入听歌序列</label>
+        </div>
         <div class="modal-actions">
           <button class="btn" data-close>取消</button>
           <button class="btn btn-primary" id="btn-save-edit">保存</button>
@@ -168,26 +137,6 @@
             <label class="row"
               ><input id="set-headless" type="checkbox" /> 无头模式（服务器）</label
             >
-            <div class="section-title">听歌任务</div>
-            <div class="settings-compact-grid">
-              <label>当天最多听 <input id="set-listen-daily-max" type="number" min="0" /></label>
-              <label>当月最多听 <input id="set-listen-monthly-max" type="number" min="0" /></label>
-              <label>默认听歌开始时间 <input id="set-listen-start-time" type="time" /></label>
-            </div>
-            <div class="listen-config-row">
-              <label>听歌 API 地址 <input id="set-listen-api-url" type="url" placeholder="例如 http://127.0.0.1:9000" /></label>
-              <label>歌曲/专辑
-                <div class="listen-item-input">
-                  <select id="set-listen-item-type">
-                    <option value="song">歌曲</option>
-                    <option value="album">专辑</option>
-                  </select>
-                  <input id="set-listen-item-id" type="text" placeholder="ID" />
-                </div>
-              </label>
-            </div>
-            <label class="row">互助客户端 Token <input id="set-listen-client-token" type="password" autocomplete="off" placeholder="由互助服务端生成" /></label>
-            <p class="hint-text">公共互助会把账号播放记录发送到第三方服务，请确认服务可信，并自行承担账号风控风险。</p>
             <div class="section-title">本地账号互助</div>
             <div class="settings-compact-grid">
               <label>当天最多听 <input id="set-local-listen-daily-max" type="number" min="0" /></label>
@@ -306,9 +255,6 @@
           权益</label
         >
         <label class="row"
-          ><input type="checkbox" class="run-task" value="listen" /> 公共互助听歌</label
-        >
-        <label class="row"
           ><input type="checkbox" class="run-task" value="local_listen" /> 本地互助听歌</label
         >
         <p class="hint-text">
@@ -382,6 +328,6 @@
       </div>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260825-2"></script>
   </body>
 </html>

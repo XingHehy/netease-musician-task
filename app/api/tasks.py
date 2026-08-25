@@ -12,7 +12,7 @@ from app.logging_conf import logger
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
-_VALID_TASKS = {"checkin", "publish", "vip", "listen", "local_listen"}
+_VALID_TASKS = {"checkin", "publish", "vip", "local_listen"}
 _TASK_ALIASES = {"publishing": "publish"}  # 兼容修复前的网页缓存
 
 
@@ -45,6 +45,27 @@ def run_selected(account_id: int, body: RunSelection) -> dict:
 
     threading.Thread(target=_bg, name=f"run-{account_id}", daemon=True).start()
     return {"ok": True, "message": f"已在后台执行：{', '.join(tasks)}"}
+
+
+@router.post("/{account_id}/sync-musician")
+def sync_musician_tasks(account_id: int) -> dict:
+    """同步该账号音乐人后台的任务进度（发布/播放等）。"""
+    account = repo.get_account(account_id)
+    if not account:
+        raise HTTPException(404, "账号不存在")
+    if account.get("account_role", "musician") != "musician":
+        raise HTTPException(400, "普通播放账号没有音乐人任务")
+
+    def _bg() -> None:
+        try:
+            from app import runner
+
+            runner.run_sync_musician_tasks(account_id)
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f"同步音乐人任务异常：{e}")
+
+    threading.Thread(target=_bg, name=f"sync-{account_id}", daemon=True).start()
+    return {"ok": True, "message": "已在后台开始同步"}
 
 
 @router.get("/logs")

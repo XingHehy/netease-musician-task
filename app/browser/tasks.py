@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime
 from typing import Any, Optional
@@ -70,6 +71,172 @@ def _capture_cycle_missions(page: Page, account_id: Optional[int], timeout_ms: i
     missions = (data.get("data") or {}).get("list") or []
     _emit(account_id, f"获取到 {len(missions)} 个循环任务")
     return missions
+
+
+# ---------- 同步音乐人任务进度 ----------
+def _normalize_mission(m: dict) -> dict:
+    """把 cycle/list 的任务对象归一成 {title, progress, status}。
+
+    接口字段没有公开文档，不同任务/版本的字段名可能不同，
+    这里按候选列表逐个尝试，全部缺失时退回任务描述原文。
+    """
+    title = str(m.get("description") or m.get("name") or m.get("missionName") or "").strip()
+
+    progress = ""
+    for key in ("progressDescription", "progressDesc", "periodDescription"):
+        value = m.get(key)
+        if isinstance(value, str) and value.strip():
+            progress = value.strip()
+            break
+    if not progress:
+        current = next(
+            (m[k] for k in ("currentPeriod", "finishNum", "currentNum", "progress")
+             if isinstance(m.get(k), int)),
+            None,
+        )
+        target = next(
+            (m[k] for k in ("periodTarget", "targetNum", "needNum", "target")
+             if isinstance(m.get(k), int)),
+            None,
+        )
+        if current is not None and target is not None:
+            progress = f"{current}/{target}"
+
+    status = ""
+    for key in ("missionStatusName", "statusName", "missionStatus", "status", "rewardStatus"):
+        value = m.get(key)
+        if value not in (None, ""):
+            status = str(value)
+            break
+    return {"title": title, "progress": progress, "status": status}
+
+
+def _split_mission_progress(raw: str) -> tuple[str, str]:
+    """拆出标题尾部 '(0/650)' 形式的进度，返回 (标题, '0/650')。"""
+    raw = (raw or "").strip()
+    match = re.search(r"\((\d+)\s*/\s*(\d+)\)\s*$", raw)
+    if not match:
+        return raw, ""
+    return raw[: match.start()].strip(), f"{match.group(1)}/{match.group(2)}"
+
+
+# 续期面板任务按「文字内容」识别，不依赖带哈希后缀、随时会变的 class。
+# 已知任务标题：「即日起30天内发布图文笔记天数≥4(4/4)」
+#             「近30天所有发布歌曲有效播放达650次(0/650)」
+_RENEWAL_KEYWORDS = ("笔记天数", "有效播放", "图文笔记", "播放达")
+
+_RENEWAL_EXTRACT_SCRIPT = """
+() => {
+    const keywords = ['笔记天数', '有效播放', '图文笔记', '播放达'];
+    const re = /\\((\\d+)\\s*\\/\\s*(\\d+)\\)\\s*$/;
+    const hits = [];
+    for (const el of document.querySelectorAll('div, span, li')) {
+        const t = (el.innerText || '').trim();
+        if (!t || t.length > 120 || el.children.length > 1) continue;
+        if (!re.test(t)) continue;
+        if (!keywords.some(k => t.includes(k))) continue;
+        if (!hits.includes(t)) hits.push(t);
+    }
+    return hits;
+}
+"""
+
+
+def _capture_renewal_missions(context, page: Page, account_id: Optional[int]) -> list[dict]:
+    """点击音乐人首页的「去续期」，读取续期面板里的任务进度。
+
+    面板可能开在新标签页，也可能渲染在 iframe 里（网易云全站惯用 iframe），
+    这里轮询所有页面 × 所有 frame，用文字特征（标题尾部的 (x/y) + 关键词）
+    定位任务行，完全不依赖 class 名。
+    """
+    pages_before = {id(p) for p in context.pages}
+    clicked = False
+    deadline = time.time() + 8
+    while time.time() < deadline and not clicked:
+        for scope in scopes(page):
+            try:
+                loc = scope.get_by_text("去续期", exact=False)
+                if loc.count() > 0 and loc.first.is_visible():
+                    loc.first.click(timeout=3000)
+                    clicked = True
+                    break
+            except Exception:
+                continue
+        if not clicked:
+            time.sleep(0.5)
+    if not clicked:
+        _emit(account_id, "未找到「去续期」入口，跳过续期任务面板", "warn")
+        return []
+    _emit(account_id, "已点击「去续期」，等待任务面板打开...")
+
+    titles: list[str] = []
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        for candidate in list(context.pages):
+            for frame in candidate.frames:
+                try:
+                    found = frame.evaluate(_RENEWAL_EXTRACT_SCRIPT)
+                except Exception:
+                    continue  # 页面还在加载/跳转中
+                if found:
+                    titles = [str(t) for t in found]
+                    break
+            if titles:
+                break
+        if titles:
+            break
+        time.sleep(0.5)
+
+    # 清掉点击带来的额外标签页
+    for candidate in list(context.pages):
+        if id(candidate) not in pages_before:
+            try:
+                candidate.close()
+            except Exception:
+                pass
+
+    if not titles:
+        _emit(account_id, "续期任务面板未能打开或文字特征未识别", "warn")
+        return []
+
+    tasks: list[dict] = []
+    for raw in titles:
+        title, progress = _split_mission_progress(raw)
+        status = ""
+        if progress:
+            current, _, target = progress.partition("/")
+            if target and current.isdigit() and int(current) >= int(target):
+                status = "已完成"
+        tasks.append({"title": title, "progress": progress, "status": status})
+    _emit(account_id, f"续期面板读取到 {len(tasks)} 个任务")
+    return tasks
+
+
+def do_sync_musician_tasks(profile_dir: str, account_id: Optional[int] = None) -> dict:
+    """打开音乐人后台读取任务进度：接口循环任务 + 「去续期」面板的发布/播放任务。"""
+    bus.status(account_id, "running", "同步音乐人任务进度")
+    with run_with_context(profile_dir, account_id=account_id, label="同步数据") as (context, page):
+        if not _validate_session(page, account_id):
+            return {"ok": False, "auth_valid": False, "message": "cookie expired"}
+        missions = _capture_cycle_missions(page, account_id)
+        cycle_tasks = [_normalize_mission(m) for m in missions if isinstance(m, dict)]
+        renewal_tasks = _capture_renewal_missions(context, page, account_id)
+        # 续期面板放前面：发布/播放任务的月度进度主要来自这里
+        tasks = renewal_tasks + cycle_tasks
+        if not tasks:
+            _emit(account_id, "未读取到任何任务，请稍后重试或检查账号音乐人身份", "warn")
+            bus.status(account_id, "done", "同步完成（无任务数据）")
+            return {"ok": False, "auth_valid": True, "tasks": [], "message": "未获取到任务列表"}
+        for t in tasks:
+            line = t["title"] or "未命名任务"
+            if t["progress"]:
+                line += f"　进度 {t['progress']}"
+            if t["status"]:
+                line += f"　[{t['status']}]"
+            _emit(account_id, f"任务：{line}")
+        _emit(account_id, f"同步完成：共 {len(tasks)} 个任务（含续期面板 {len(renewal_tasks)} 个）")
+        bus.status(account_id, "done", "同步完成")
+        return {"ok": True, "auth_valid": True, "tasks": tasks, "message": f"同步到 {len(tasks)} 个任务"}
 
 
 # ---------- 签到（页面级）----------
@@ -238,61 +405,6 @@ def _click_play_controls(page: Page, *, force: bool = False) -> bool:
     return False
 
 
-def do_listen_music(
-    profile_dir: str,
-    netease_item_id: str,
-    account_id: Optional[int] = None,
-    timeout_seconds: int = 1200,
-) -> dict:
-    """打开歌曲并完整播放，供互助服务的 /next 与 /play/finish 使用。"""
-    item_id = str(netease_item_id or "").strip()
-    item_kind, target_id = "song", item_id
-    if item_id.startswith("album:"):
-        item_kind, target_id = "album", item_id[6:].strip()
-    if not target_id.isdigit():
-        return {"ok": False, "message": f"无效的歌曲/专辑 ID：{item_id}"}
-
-    bus.status(account_id, "running", f"播放听歌任务：{item_id}")
-    with run_with_context(profile_dir, account_id=account_id, label="听歌") as (context, page):
-        if not _validate_session(page, account_id):
-            return {"ok": False, "auth_valid": False, "message": "cookie expired"}
-        page.goto(
-            f"https://music.163.com/#/{item_kind}?id={target_id}",
-            wait_until="domcontentloaded",
-        )
-        page.wait_for_timeout(3000)
-        # 首次进入歌曲页只尝试一次。播放按钮是 toggle，不能在状态未知时
-        # 周期性点击，否则会出现播放一下又暂停一下。
-        _click_play_controls(page, force=True)
-        deadline = time.time() + timeout_seconds
-        last_progress = 0.0
-        last_log = 0.0
-        while time.time() < deadline:
-            state = _read_playback_state(page)
-            cur = float(state.get("cur", 0))
-            dur = float(state.get("dur", 0))
-            if dur > 0 and cur >= dur - 2500:
-                _emit(account_id, f"听歌完成：{item_id}（{dur / 1000:.0f} 秒）")
-                bus.status(account_id, "done", "听歌任务完成")
-                return {
-                    "ok": True,
-                    "item_id": item_id,
-                    "played_ms": int(cur),
-                    "duration_ms": int(dur),
-                    "cookie_str": cookies_to_str(context.cookies("https://music.163.com")),
-                }
-            if state.get("state") in {"paused", "stop"}:
-                _click_play_controls(page)
-            if cur > last_progress:
-                last_progress = cur
-            if time.time() - last_log >= 15:
-                _emit(account_id, f"听歌播放中：{item_id}，进度 {cur / 1000:.0f}/{dur / 1000:.0f} 秒")
-                last_log = time.time()
-            time.sleep(2)
-        _emit(account_id, f"听歌超时：{item_id}", "warn")
-        return {"ok": False, "message": "播放超时"}
-
-
 def _listen_local_item_on_page(
     page: Page,
     item_id: str,
@@ -311,6 +423,7 @@ def _listen_local_item_on_page(
         return {"ok": False, "item_id": item_id, "message": "未找到可用的播放按钮"}
     deadline = time.time() + timeout_seconds
     last_log = 0.0
+    last_cur = 0.0
     while time.time() < deadline:
         from app.browser import registry
 
@@ -318,12 +431,24 @@ def _listen_local_item_on_page(
             return {"ok": False, "stopped": True, "item_id": item_id, "message": "任务已停止"}
         state = _read_playback_state(page)
         cur, dur = float(state.get("cur", 0)), float(state.get("dur", 0))
-        required = min(dur, dur * max(34, min(100, play_percent)) / 100 + 5000) if dur > 0 else 0
-        if required > 0 and cur >= required:
+        percent = max(34, min(100, play_percent))
+        completed = False
+        if dur > 0 and percent >= 100:
+            # Polling can miss the exact endpoint when the player immediately loops.
+            end_tolerance = max(3000.0, min(15000.0, dur * 0.08))
+            completed = cur >= dur - end_tolerance
+            if last_cur >= dur * 0.8 and cur <= dur * 0.2:
+                completed = True
+            required = dur - end_tolerance
+        else:
+            required = min(dur, dur * percent / 100 + 5000) if dur > 0 else 0
+            completed = required > 0 and cur >= required
+        if completed:
             _emit(account_id, f"本地互助计次完成：{item_id}（已播放 {cur / 1000:.0f}/{dur / 1000:.0f} 秒）")
             return {"ok": True, "item_id": item_id, "played_ms": int(cur), "duration_ms": int(dur)}
         if state.get("state") in {"paused", "stop"}:
             _click_play_controls(page)
+        last_cur = cur
         if time.time() - last_log >= 15:
             _emit(account_id, f"本地互助播放中：{item_id}，进度 {cur / 1000:.0f}/{dur / 1000:.0f} 秒")
             last_log = time.time()
@@ -337,8 +462,13 @@ def do_local_listen_music_batch(
     account_id: Optional[int] = None,
     play_percent: int = 34,
     timeout_seconds: int = 1200,
+    on_result=None,
 ) -> dict:
-    """在同一个浏览器会话中依次播放本地互助目标。"""
+    """在同一个浏览器会话中依次播放本地互助目标。
+
+    on_result(index, result)：每播完一首（无论成败）在 worker 线程内回调，
+    供调用方实时落库并推送前端刷新，而不是等整批结束后统一处理。
+    """
     item_ids = [str(item).strip() for item in netease_item_ids if str(item).strip()]
     if not item_ids:
         return {"ok": False, "results": [], "message": "没有可播放的歌曲"}
@@ -359,6 +489,11 @@ def do_local_listen_music_batch(
             _emit(account_id, f"本地互助第 {index + 1}/{len(item_ids)} 首：{item_id}")
             result = _listen_local_item_on_page(current_page, item_id, account_id, play_percent, timeout_seconds)
             results.append(result)
+            if on_result is not None:
+                try:
+                    on_result(index, result)
+                except Exception as e:  # noqa: BLE001  回调异常不能中断播放批次
+                    _emit(account_id, f"记录互助结果失败：{e}", "warn")
             if result.get("stopped"):
                 break
     completed = sum(1 for result in results if result.get("ok"))

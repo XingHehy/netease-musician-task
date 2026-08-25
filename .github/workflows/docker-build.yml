@@ -55,6 +55,8 @@ jobs:
           INPUT_VERSION_TAG: ${{ github.event.inputs.version_tag }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
+          set -e
+
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             # 手动运行，取输入框版本
             tag="$INPUT_VERSION_TAG"
@@ -72,14 +74,18 @@ jobs:
 
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "最终使用镜像版本: $tag"
+        shell: bash
 
-      # 构建多架构镜像 + 同时推送到两个平台
+      # 构建并推送多架构镜像；关闭 provenance/sbom，
+      # 避免阿里云 ACR 不兼容 OCI empty manifest（unknown manifest class / denied）
       - name: 构建并推送多架构镜像
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: false
+          sbom: false
           tags: |
             registry.cn-hangzhou.aliyuncs.com/xinghehy/netease-musician-task:${{ steps.vars.outputs.tag }}
             registry.cn-hangzhou.aliyuncs.com/xinghehy/netease-musician-task:latest
