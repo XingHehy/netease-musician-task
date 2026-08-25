@@ -183,8 +183,7 @@ async function loadAccounts() {
         </div>`
       : "";
     // 参与本地互助的账号展示帮听进度；被听进度只在音乐人卡片显示（平台同步值）
-    const inLocalListen = !!a.local_listen_enabled;
-    const helpedMeta = inLocalListen
+    const helpedMeta = !isMusician && a.local_listen_enabled
       ? `
         <div class="meta-item">
           <span class="meta-label">今日帮听</span>
