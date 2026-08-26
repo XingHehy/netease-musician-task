@@ -28,7 +28,7 @@ RUN set -eux; \
     echo "deb http://mirrors.aliyun.com/debian ${codename}-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list; \
     echo "deb http://mirrors.aliyun.com/debian-security ${codename}-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list; \
     apt-get update; \
-    apt-get install -y --no-install-recommends nodejs; \
+    apt-get install -y --no-install-recommends nodejs chromium; \
     rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./

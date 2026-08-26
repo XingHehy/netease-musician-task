@@ -19,7 +19,7 @@ from concurrent.futures import Future
 from contextlib import contextmanager
 from typing import Any, Callable
 
-from app.config import BROWSER_TIMEOUT_MS, HEADLESS, USER_AGENT
+from app.config import BROWSER_TIMEOUT_MS, HEADLESS, PLAYWRIGHT_EXECUTABLE_PATH, USER_AGENT
 from app.browser.selectors import STEALTH_SCRIPT
 from app.logging_conf import logger
 
@@ -83,19 +83,22 @@ def run_with_context(profile_dir: str, *, headless: bool | None = None, account_
         use_headless = headless
 
     with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=profile_dir,
-            headless=use_headless,
-            viewport={"width": 1280, "height": 800},
-            user_agent=USER_AGENT,
-            locale="zh-CN",
-            timezone_id="Asia/Shanghai",
-            args=[
+        launch_options = {
+            "user_data_dir": profile_dir,
+            "headless": use_headless,
+            "viewport": {"width": 1280, "height": 800},
+            "user_agent": USER_AGENT,
+            "locale": "zh-CN",
+            "timezone_id": "Asia/Shanghai",
+            "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
                 "--no-sandbox",
             ],
-        )
+        }
+        if PLAYWRIGHT_EXECUTABLE_PATH:
+            launch_options["executable_path"] = PLAYWRIGHT_EXECUTABLE_PATH
+        context = p.chromium.launch_persistent_context(**launch_options)
         context.add_init_script(STEALTH_SCRIPT)
         page = context.new_page()
         page.set_default_timeout(BROWSER_TIMEOUT_MS)

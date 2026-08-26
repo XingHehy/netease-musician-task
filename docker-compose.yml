@@ -17,8 +17,9 @@ services:
       # Web 服务
       - APP_HOST=0.0.0.0
       - APP_PORT=8000
-      # 容器内无头运行浏览器
+      # 容器内无头运行系统 Chromium
       - PLAYWRIGHT_HEADLESS=1
+      - PLAYWRIGHT_EXECUTABLE_PATH=/usr/bin/chromium
       # 每日任务默认执行时间（HH:MM），账号可单独覆盖
       - SEND_TIME=09:30
       # 间隔任务执行间隔天数

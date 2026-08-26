@@ -38,6 +38,11 @@ USER_AGENT = os.getenv(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
 )
+# Linux 容器优先使用系统 Chromium；其他环境继续使用 Playwright 自带浏览器。
+_default_chromium = "/usr/bin/chromium"
+PLAYWRIGHT_EXECUTABLE_PATH = os.getenv("PLAYWRIGHT_EXECUTABLE_PATH", "").strip()
+if not PLAYWRIGHT_EXECUTABLE_PATH and os.path.isfile(_default_chromium):
+    PLAYWRIGHT_EXECUTABLE_PATH = _default_chromium
 # 浏览器操作默认超时（毫秒）
 BROWSER_TIMEOUT_MS = int(os.getenv("BROWSER_TIMEOUT_MS", "30000"))
 
